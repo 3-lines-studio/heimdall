@@ -67,7 +67,7 @@ h3 {
   font-size: 13px;
 }
 
-main {
+#app {
   padding: 16px;
 }
 
@@ -257,7 +257,7 @@ td.acciones {
 }
 
 @media (min-width: 760px) {
-  main {
+  #app {
     display: grid;
     grid-template-columns: 220px 1fr;
     gap: 24px;
