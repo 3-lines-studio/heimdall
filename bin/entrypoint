@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p "$HEIMDALL_DATA"
+    chown -R heimdall:heimdall "$HEIMDALL_DATA"
+    exec setpriv --reuid=heimdall --regid=heimdall --init-groups "$@"
+fi
+
+exec "$@"

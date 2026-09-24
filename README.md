@@ -16,6 +16,8 @@ Nobody gets into the service. The only way to a secret is the API, with a token.
   services exist.
 - Tokens are stored hashed, with their scope. A token for `bifrost/dev` cannot
   read `bifrost/prod`: no request returns it, and asking for it is a 403.
+- Every value carries its own name inside its sealed box, so swapping two rows
+  in the database is a decryption error and not a swapped secret.
 - The audit log records who read what, who wrote it and who asked for a token.
   Never a value.
 
@@ -43,9 +45,12 @@ value, add or delete one, create a token and read the audit. It is one static
 page and a little JavaScript over the same API, so there is nothing new to
 learn and nothing new to trust.
 
-You get in with a magic link. Only the addresses in `HEIMDALL_EMAILS` get one;
-the link lives fifteen minutes and works once, and the session is an
-`HttpOnly`, `SameSite=Strict` cookie for thirty days.
+You get in with a magic link. Only the addresses in `HEIMDALL_EMAILS` get one,
+one per minute at most; the link lives fifteen minutes and works once.
+
+The token travels in the URL fragment, which never reaches the server, so it
+stays out of the logs. The session is an `HttpOnly`, `SameSite=Strict`,
+`Secure` cookie for thirty days.
 
 ```
 HEIMDALL_EMAILS=me@example.com,otro@example.com
@@ -55,8 +60,8 @@ HEIMDALL_FROM="Heimdall <heimdall@example.com>"
 HEIMDALL_WEB_DEV=1                          # answers the link instead of mailing it
 ```
 
-The page is `/`, the login is `/login`, and `/auth?token=` is what the link
-points at.
+The page is `/`, the login is `/login`, and the link points at `/auth`, where a
+handful of lines of JavaScript turn the fragment into a session.
 
 ## The client
 
@@ -99,8 +104,21 @@ Tokens go in `Authorization: Bearer <token>`. They expire only if you gave them 
 
 - 64 connections at a time, each one giving up after 15 seconds. Past that the
   answer is a 503, not another thread.
-- Bodies up to 1 MB, single values up to 64 KB.
+- 16 KB of request header, 8 KB per line, 1 MB of body, 64 KB per value. A
+  request that goes over is cut off instead of growing the process.
 - The audit endpoint answers the newest 500 unless you pass another `limit`.
+
+## What it does not do
+
+Nobody gets into the service, but the container itself is only as tight as the
+platform around it:
+
+- The master key lives in the service's environment. Anyone who can read that
+  container's environment opens every value; there is no KMS behind it.
+- The process runs as an unprivileged user, with no shell and nothing to
+  execute, but the volume is still the volume.
+- There is no rate limiting beyond the login cooldown, and no lockout: with no
+  passwords there is nothing to guess, and tokens are 192 bits.
 
 ## Development
 

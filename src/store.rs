@@ -130,7 +130,9 @@ impl Store {
         let mut out = BTreeMap::new();
         for row in rows {
             let (name, value) = row?;
-            let plain = subkey.open(&value).map_err(Error::Internal)?;
+            let plain = subkey
+                .open(&value, aad(project, env, &name).as_bytes())
+                .map_err(Error::Internal)?;
             let text = String::from_utf8(plain)
                 .map_err(|_| Error::Internal(format!("{name} no es texto")))?;
             out.insert(name, text);
@@ -155,7 +157,7 @@ impl Store {
         let sealed = self
             .key
             .derive(&context(project, env))
-            .seal(value.as_bytes())
+            .seal(value.as_bytes(), aad(project, env, name).as_bytes())
             .map_err(Error::Internal)?;
         let tx = self.db.unchecked_transaction()?;
         self.db.execute(
@@ -351,6 +353,15 @@ impl Store {
         Ok(email)
     }
 
+    pub fn asked_recently(&self, email: &str, within: i64) -> Result<bool> {
+        let last: Option<i64> = self.db.query_row(
+            "SELECT MAX(created_at) FROM logins WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        )?;
+        Ok(last.is_some_and(|last| now() - last < within))
+    }
+
     pub fn create_session(&self, email: &str, ttl: i64) -> Result<String> {
         let plain = crypto::random_hex(24).map_err(Error::Internal)?;
         self.db.execute(
@@ -407,6 +418,12 @@ fn row_token(row: &rusqlite::Row) -> rusqlite::Result<Token> {
 
 fn context(project: &str, env: &str) -> String {
     format!("secrets/{project}/{env}")
+}
+
+/// El sobre cifrado lleva su nombre adentro, así que moverlo de fila no lo
+/// convierte en otro secreto.
+fn aad(project: &str, env: &str, name: &str) -> String {
+    format!("secrets/{project}/{env}/{name}")
 }
 
 pub fn now() -> i64 {
@@ -664,6 +681,15 @@ mod tests {
         let store = store();
         let link = store.create_login("berti@ejemplo.com", -1).unwrap();
         assert!(store.consume_login(&link).is_err());
+    }
+
+    #[test]
+    fn a_second_link_is_a_cooldown_too_soon() {
+        let store = store();
+        assert!(!store.asked_recently("berti@ejemplo.com", 60).unwrap());
+        store.create_login("berti@ejemplo.com", 900).unwrap();
+        assert!(store.asked_recently("berti@ejemplo.com", 60).unwrap());
+        assert!(!store.asked_recently("otro@ejemplo.com", 60).unwrap());
     }
 
     #[test]
