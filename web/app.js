@@ -47,7 +47,7 @@ async function copiar(texto) {
   }
 }
 
-const fecha = (segundos) => new Date(segundos * 1000).toLocaleString();
+const fecha = (cuando) => new Date(cuando * 1000).toLocaleString();
 
 async function cargarEntornos() {
   const lista = await api('GET', '/v1/environments');
@@ -70,7 +70,7 @@ async function abrir(project, env) {
   estado.env = env;
   estado.revelados.clear();
   try {
-    estado.secretos = await api('GET', `/v1/secrets?project=${encodeURIComponent(project)}&env=${encodeURIComponent(env)}`);
+    estado.secretos = await api('GET', urlDeClaves(project, env));
   } catch (error) {
     aviso(error.message);
     return;
@@ -135,9 +135,7 @@ async function cargarTokens() {
   }
   for (const token of lista) {
     const fila = nodo('div', null, 'fila');
-    const alcance = token.admin ? 'administra' : `${token.project}/${token.env}`;
-    const detalles = [alcance];
-    if (token.keys && token.keys.length) detalles.push(`sólo ${token.keys.join(', ')}`);
+    const detalles = [alcanceDeToken(token)];
     if (token.expires_at) detalles.push(`vence ${fecha(token.expires_at)}`);
     detalles.push(token.last_used ? `último uso ${fecha(token.last_used)}` : 'sin uso');
     const texto = nodo('div');
@@ -188,12 +186,7 @@ $('alta').addEventListener('submit', async (evento) => {
   }
 });
 
-$('env').addEventListener('click', () => {
-  const lineas = Object.keys(estado.secretos)
-    .sort()
-    .map((clave) => `${clave}=${estado.secretos[clave]}`);
-  copiar(lineas.join('\n'));
-});
+$('env').addEventListener('click', () => copiar(comoEnv(estado.secretos)));
 
 $('refrescar').addEventListener('click', () => abrir(estado.project, estado.env));
 
@@ -204,11 +197,17 @@ $('token-nuevo').addEventListener('submit', async (evento) => {
     project: estado.project,
     env: estado.env,
   };
-  const claves = $('token-claves').value.split(',').map((clave) => clave.trim()).filter(Boolean);
+  const claves = clavesDe($('token-claves').value);
   if (claves.length) cuerpo.keys = claves;
   const ttl = $('token-ttl').value.trim();
-  if (ttl) cuerpo.ttl = segundos(ttl);
-  if (cuerpo.ttl === null) return;
+  if (ttl) {
+    const vencimiento = segundos(ttl);
+    if (vencimiento === null) {
+      aviso('El vencimiento va como 30m, 2h o 7d.');
+      return;
+    }
+    cuerpo.ttl = vencimiento;
+  }
   try {
     const creado = await api('POST', '/v1/tokens', cuerpo);
     $('token-nombre').value = '';
@@ -225,17 +224,6 @@ $('token-nuevo').addEventListener('submit', async (evento) => {
     aviso(error.message);
   }
 });
-
-function segundos(texto) {
-  const unidades = { s: 1, m: 60, h: 3600, d: 86400 };
-  const ultimo = texto.slice(-1);
-  const numero = Number(texto.slice(0, -1));
-  if (!unidades[ultimo] || !Number.isFinite(numero) || numero <= 0) {
-    aviso('El vencimiento va como 30m, 2h o 7d.');
-    return null;
-  }
-  return numero * unidades[ultimo];
-}
 
 $('salir').addEventListener('click', async () => {
   await api('POST', '/api/logout');
