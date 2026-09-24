@@ -7,6 +7,7 @@ use std::sync::Arc;
 const INDEX: &str = include_str!("../web/index.html");
 const LOGIN: &str = include_str!("../web/login.html");
 const APP: &str = include_str!("../web/app.js");
+const UTIL: &str = include_str!("../web/util.js");
 const STYLE: &str = include_str!("../web/style.css");
 const ICON: &str = include_str!("../web/icon.svg");
 
@@ -26,6 +27,7 @@ pub fn handle(
         ("GET", "/") => app(server, request, stream),
         ("GET", "/login") => http::send_text(stream, 200, HTML, &versioned(LOGIN)),
         ("GET", "/app.js") => asset(stream, JS, APP.as_bytes()),
+        ("GET", "/util.js") => asset(stream, JS, UTIL.as_bytes()),
         ("GET", "/style.css") => asset(stream, CSS, STYLE.as_bytes()),
         ("GET", "/icon.svg") => asset(stream, "image/svg+xml", ICON.as_bytes()),
         ("POST", "/api/login") => ask_for_link(server, request, stream),
@@ -152,6 +154,7 @@ fn asset(stream: &mut TcpStream, content_type: &str, body: &[u8]) -> std::io::Re
 fn versioned(page: &str) -> String {
     let version = std::env::var("RAILWAY_GIT_COMMIT_SHA").unwrap_or_default();
     page.replace("/app.js", &format!("/app.js?v={version}"))
+        .replace("/util.js", &format!("/util.js?v={version}"))
         .replace("/style.css", &format!("/style.css?v={version}"))
         .replace("/icon.svg", &format!("/icon.svg?v={version}"))
 }
@@ -163,8 +166,11 @@ mod tests {
     #[test]
     fn versioned_assets_point_at_the_commit() {
         std::env::set_var("RAILWAY_GIT_COMMIT_SHA", "abc123");
-        let page = versioned(r#"<script src="/app.js"></script><link href="/style.css">"#);
+        let page = versioned(
+            r#"<script src="/app.js"></script><script src="/util.js"></script><link href="/style.css">"#,
+        );
         assert!(page.contains("/app.js?v=abc123"));
+        assert!(page.contains("/util.js?v=abc123"));
         assert!(page.contains("/style.css?v=abc123"));
     }
 }
