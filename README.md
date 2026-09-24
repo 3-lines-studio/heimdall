@@ -16,6 +16,10 @@ Nobody gets into the service. The only way to a secret is the API, with a token.
   services exist.
 - Tokens are stored hashed, with their scope. A token for `bifrost/dev` cannot
   read `bifrost/prod`: no request returns it, and asking for it is a 403.
+- The project and the environment accept `*`. `*/dev` reads every project's `dev`
+  and nothing else, which is what a shared runner wants: one token, every
+  sandbox, no path to production. A wildcard widens **what can be read** and
+  nothing more: writing, dropping and minting tokens stay with the admin.
 - Every value carries its own name inside its sealed box, so swapping two rows
   in the database is a decryption error and not a swapped secret. Renaming an
   environment or a project re-seals what it held, since the name is part of the
@@ -88,6 +92,7 @@ heimdall set STRIPE_KEY=sk_test_1
 heimdall ls
 heimdall environments
 heimdall token create --name agente --keys STRIPE_KEY --ttl 1h
+heimdall token create --name jimmy --project '*' --env dev --ttl 7d
 heimdall token list
 heimdall token revoke --id 3f9c1a
 heimdall audit

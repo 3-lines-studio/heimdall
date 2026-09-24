@@ -625,3 +625,120 @@ fn run_takes_the_scope_from_the_setup_file() {
     let out = run(Some("la-del-shell"));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "la-del-shell");
 }
+
+#[test]
+fn a_wildcard_token_reaches_every_project_in_its_environment() {
+    let running = start();
+    wait_for(&running);
+
+    for project in ["picsel", "bifrost"] {
+        let (status, _) = call(
+            &running,
+            "PUT",
+            "/v1/secrets",
+            "hd_admin",
+            Some(
+                json!({ "project": project, "env": "dev", "key": "BUCKET", "value": format!("{project}-dev") }),
+            ),
+        );
+        assert_eq!(status, 200);
+    }
+    call(
+        &running,
+        "POST",
+        "/v1/environments",
+        "hd_admin",
+        Some(json!({ "project": "picsel", "env": "prod" })),
+    );
+
+    let (status, created) = call(
+        &running,
+        "POST",
+        "/v1/tokens",
+        "hd_admin",
+        Some(json!({ "name": "dev", "project": "*", "env": "dev" })),
+    );
+    assert_eq!(status, 200);
+    let token = created["token"].as_str().unwrap().to_string();
+    assert_eq!(created["project"], "*");
+
+    for project in ["picsel", "bifrost"] {
+        let (status, secrets) = call(
+            &running,
+            "GET",
+            &format!("/v1/secrets?project={project}&env=dev"),
+            &token,
+            None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(secrets["BUCKET"], format!("{project}-dev"));
+    }
+
+    let (status, error) = call(
+        &running,
+        "GET",
+        "/v1/secrets?project=picsel&env=prod",
+        &token,
+        None,
+    );
+    assert_eq!(status, 403);
+    assert!(error["error"].as_str().unwrap().contains("no llega"));
+
+    let (status, _) = call(
+        &running,
+        "PUT",
+        "/v1/secrets",
+        &token,
+        Some(json!({ "project": "picsel", "env": "dev", "key": "OTRO", "value": "x" })),
+    );
+    assert_eq!(status, 403);
+
+    let (status, _) = call(&running, "GET", "/v1/tokens", &token, None);
+    assert_eq!(status, 403);
+}
+
+#[test]
+fn a_wildcard_in_the_environment_stays_inside_its_project() {
+    let running = start();
+    wait_for(&running);
+
+    for (project, env) in [("picsel", "dev"), ("picsel", "prod"), ("bifrost", "dev")] {
+        call(
+            &running,
+            "POST",
+            "/v1/environments",
+            "hd_admin",
+            Some(json!({ "project": project, "env": env })),
+        );
+    }
+
+    let (status, created) = call(
+        &running,
+        "POST",
+        "/v1/tokens",
+        "hd_admin",
+        Some(json!({ "name": "picsel", "project": "picsel", "env": "*" })),
+    );
+    assert_eq!(status, 200);
+    let token = created["token"].as_str().unwrap().to_string();
+
+    for env in ["dev", "prod"] {
+        let (status, _) = call(
+            &running,
+            "GET",
+            &format!("/v1/secrets?project=picsel&env={env}"),
+            &token,
+            None,
+        );
+        assert_eq!(status, 200);
+    }
+
+    let (status, _) = call(
+        &running,
+        "GET",
+        "/v1/secrets?project=bifrost&env=dev",
+        &token,
+        None,
+    );
+    assert_eq!(status, 403);
+}

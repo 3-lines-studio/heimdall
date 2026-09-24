@@ -196,9 +196,13 @@ fn admin(actor: &Actor) -> std::result::Result<(), (u16, String)> {
 fn scoped(actor: &Actor, project: &str, env: &str) -> std::result::Result<(), (u16, String)> {
     match actor {
         Actor::Admin(_) => Ok(()),
-        Actor::Token(token) if token.project == project && token.env == env => Ok(()),
+        Actor::Token(token) if covers(&token.project, project) && covers(&token.env, env) => Ok(()),
         Actor::Token(_) => Err((403, "este token no llega a ese entorno".to_string())),
     }
+}
+
+fn covers(pattern: &str, value: &str) -> bool {
+    pattern == "*" || pattern == value
 }
 
 fn visible(actor: &Actor, map: BTreeMap<String, String>) -> BTreeMap<String, String> {
