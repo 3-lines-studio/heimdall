@@ -567,3 +567,61 @@ fn renaming_a_project_keeps_the_secrets_readable() {
     let (_, names) = call(&running, "GET", "/v1/environments", "hd_admin", None);
     assert_eq!(names, json!([]));
 }
+
+#[test]
+fn run_takes_the_scope_from_the_setup_file() {
+    let running = start();
+    wait_for(&running);
+
+    call(
+        &running,
+        "PUT",
+        "/v1/secrets",
+        "hd_admin",
+        Some(
+            json!({ "project": "picsel", "env": "dev", "key": "BUCKET", "value": "picsel-staging" }),
+        ),
+    );
+
+    let root = std::env::temp_dir().join(format!(
+        "heimdall-run-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(root.join("sub")).expect("sin directorio");
+    std::fs::write(
+        root.join("heimdall.yaml"),
+        "setup:\n  - project: picsel\n    config: dev\n",
+    )
+    .expect("sin archivo");
+
+    let run = |bucket: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_heimdall"));
+        command
+            .args([
+                "run",
+                "--preserve-env",
+                "--preserve-env",
+                "--",
+                "sh",
+                "-c",
+                "echo $BUCKET",
+            ])
+            .current_dir(root.join("sub"))
+            .env("HEIMDALL_URL", &running.url)
+            .env("HEIMDALL_TOKEN", "hd_admin");
+        if let Some(bucket) = bucket {
+            command.env("BUCKET", bucket);
+        }
+        command.output().expect("no corrió")
+    };
+
+    let out = run(None);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "picsel-staging"
+    );
+
+    let out = run(Some("la-del-shell"));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "la-del-shell");
+}

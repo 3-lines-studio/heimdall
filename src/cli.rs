@@ -1,9 +1,17 @@
 use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const SETUP_FILE: &str = "heimdall.yaml";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str).unwrap_or("") {
         "run" => forward(args),
+        "setup" => setup(args),
+        "login" => login(args),
+        "logout" => logout(),
         "set" => set(args),
         "unset" => unset(args),
         "ls" | "keys" => keys(args),
@@ -23,29 +31,36 @@ fn usage() {
         "\
 heimdall — secretos por proyecto y entorno
 
-  heimdall run --project X --env Y -- comando
-  heimdall set CLAVE=valor --project X --env Y
-  heimdall unset CLAVE --project X --env Y
-  heimdall ls --project X --env Y
+  heimdall setup --project X --config Y [--dir D]
+  heimdall run [--project X] [--config Y] -- comando
+  heimdall login --token T
+  heimdall logout
+  heimdall set CLAVE=valor [--project X] [--env Y]
+  heimdall unset CLAVE [--project X] [--env Y]
+  heimdall ls [--project X] [--env Y]
   heimdall environments
-  heimdall token create --name N --project X --env Y [--keys A,B] [--ttl 2h]
+  heimdall token create --name N [--project X] [--env Y] [--keys A,B] [--ttl 2h]
   heimdall token create --name N --admin [--ttl 24h]
   heimdall token list
   heimdall token revoke --id ID
   heimdall audit
   heimdall help
 
-El cliente lee HEIMDALL_URL (por defecto http://127.0.0.1:8080) y HEIMDALL_TOKEN."
+El proyecto y el entorno salen de los flags o, si no los pasás, de un
+heimdall.yaml que se busca en el directorio actual y hacia arriba. Lo escribe
+«heimdall setup». Los flags son los de doppler: -p/--project, -c/--config.
+
+El cliente lee HEIMDALL_URL (por defecto http://127.0.0.1:8080) y HEIMDALL_TOKEN.
+El token también puede estar guardado con «heimdall login»."
     );
 }
 
 fn forward(args: &[String]) -> Result<(), String> {
-    let project = required(args, "--project")?;
-    let env = required(args, "--env")?;
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
         return Err("falta el -- antes del comando".to_string());
     };
-    let command: Vec<&String> = args[separator + 1..].iter().collect();
+    let (project, env) = scope(&args[..separator])?;
+    let command = &args[separator + 1..];
     let Some((program, rest)) = command.split_first() else {
         return Err("falta el comando después del --".to_string());
     };
@@ -55,24 +70,132 @@ fn forward(args: &[String]) -> Result<(), String> {
         None,
     )?;
     let mut child = Command::new(program);
-    child.args(rest.iter().map(|arg| arg.as_str()));
+    child.args(rest);
     child.env_remove("HEIMDALL_TOKEN");
     if let Some(map) = secrets.as_object() {
         for (name, value) in map {
+            if std::env::var_os(name).is_some() {
+                continue;
+            }
             if let Some(text) = value.as_str() {
                 child.env(name, text);
             }
         }
     }
-    let status = child
-        .status()
-        .map_err(|e| format!("no pude correr {program}: {e}"))?;
-    std::process::exit(status.code().unwrap_or(1))
+    Err(format!("no pude correr {program}: {}", child.exec()))
+}
+
+struct Setup {
+    project: String,
+    env: String,
+}
+
+fn setup(args: &[String]) -> Result<(), String> {
+    let dir = match flag(args, "--dir") {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir().map_err(|e| format!("no sé dónde estoy: {e}"))?,
+    };
+    let project = pick(args, &["--project", "-p"], None).ok_or("falta --project")?;
+    let env = pick(args, &["--config", "-c", "--env"], None).ok_or("falta --config")?;
+    let file = dir.join(SETUP_FILE);
+    let body = format!("setup:\n  - project: {project}\n    config: {env}\n");
+    std::fs::write(&file, body).map_err(|e| format!("no pude escribir {}: {e}", file.display()))?;
+    println!("{} → {project}/{env}", file.display());
+    Ok(())
+}
+
+fn login(args: &[String]) -> Result<(), String> {
+    let token = match flag(args, "--token") {
+        Some(token) => token,
+        None => {
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| format!("no pude leer el token: {e}"))?;
+            line.trim().to_string()
+        }
+    };
+    if token.is_empty() {
+        return Err(
+            "esperaba el token: `heimdall login --token T`, o pegámelo por stdin".to_string(),
+        );
+    }
+    let file = token_file();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("no pude crear {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&file, token)
+        .map_err(|e| format!("no pude escribir {}: {e}", file.display()))?;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("no pude cerrar los permisos de {}: {e}", file.display()))?;
+    println!("guardado en {}", file.display());
+    Ok(())
+}
+
+fn logout() -> Result<(), String> {
+    let file = token_file();
+    if file.exists() {
+        std::fs::remove_file(&file)
+            .map_err(|e| format!("no pude borrar {}: {e}", file.display()))?;
+    }
+    println!("listo, no queda ningún token guardado");
+    Ok(())
+}
+
+fn scope(args: &[String]) -> Result<(String, String), String> {
+    let file = find_setup();
+    let project = pick(
+        args,
+        &["--project", "-p"],
+        file.as_ref().map(|s| s.project.clone()),
+    )
+    .ok_or("falta el proyecto: pasá --project, o corré «heimdall setup»")?;
+    let env = pick(
+        args,
+        &["--config", "-c", "--env"],
+        file.as_ref().map(|s| s.env.clone()),
+    )
+    .ok_or("falta el entorno: pasá --config, o corré «heimdall setup»")?;
+    Ok((project, env))
+}
+
+fn pick(args: &[String], names: &[&str], fallback: Option<String>) -> Option<String> {
+    names.iter().find_map(|name| flag(args, name)).or(fallback)
+}
+
+fn find_setup() -> Option<Setup> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let file = dir.join(SETUP_FILE);
+        if file.is_file() {
+            return read_setup(&file);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
+
+fn read_setup(file: &Path) -> Option<Setup> {
+    let text = std::fs::read_to_string(file).ok()?;
+    Some(Setup {
+        project: yaml_value(&text, "project")?,
+        env: yaml_value(&text, "config")?,
+    })
+}
+
+fn yaml_value(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    text.lines().find_map(|line| {
+        line.trim()
+            .trim_start_matches('-')
+            .trim()
+            .strip_prefix(&prefix)
+            .map(|value| value.trim().to_string())
+    })
 }
 
 fn set(args: &[String]) -> Result<(), String> {
-    let project = required(args, "--project")?;
-    let env = required(args, "--env")?;
+    let (project, env) = scope(args)?;
     let pair = args
         .get(1)
         .filter(|arg| arg.contains('='))
@@ -88,8 +211,7 @@ fn set(args: &[String]) -> Result<(), String> {
 }
 
 fn unset(args: &[String]) -> Result<(), String> {
-    let project = required(args, "--project")?;
-    let env = required(args, "--env")?;
+    let (project, env) = scope(args)?;
     let name = args.get(1).ok_or("esperaba la clave a sacar")?;
     call(
         "DELETE",
@@ -101,8 +223,7 @@ fn unset(args: &[String]) -> Result<(), String> {
 }
 
 fn keys(args: &[String]) -> Result<(), String> {
-    let project = required(args, "--project")?;
-    let env = required(args, "--env")?;
+    let (project, env) = scope(args)?;
     let value = call(
         "GET",
         &format!("/v1/keys?project={project}&env={env}"),
@@ -140,8 +261,9 @@ fn token_create(args: &[String]) -> Result<(), String> {
     let admin = args.iter().any(|arg| arg == "--admin");
     let mut body = json!({ "name": name, "admin": admin });
     if !admin {
-        body["project"] = json!(required(args, "--project")?);
-        body["env"] = json!(required(args, "--env")?);
+        let (project, env) = scope(args)?;
+        body["project"] = json!(project);
+        body["env"] = json!(env);
         if let Some(keys) = flag(args, "--keys") {
             let list: Vec<&str> = keys
                 .split(',')
@@ -253,7 +375,7 @@ fn audit() -> Result<(), String> {
 
 fn call(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
     let url = format!("{}{}", base_url(), path);
-    let token = std::env::var("HEIMDALL_TOKEN").map_err(|_| "falta HEIMDALL_TOKEN".to_string())?;
+    let token = auth_token()?;
     let request = match method {
         "GET" => ureq::get(&url),
         "PUT" => ureq::put(&url),
@@ -285,9 +407,37 @@ fn base_url() -> String {
     std::env::var("HEIMDALL_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
 
+fn auth_token() -> Result<String, String> {
+    if let Ok(token) = std::env::var("HEIMDALL_TOKEN") {
+        return Ok(token);
+    }
+    let file = token_file();
+    std::fs::read_to_string(&file)
+        .map(|text| text.trim().to_string())
+        .map_err(|_| {
+            format!(
+                "falta HEIMDALL_TOKEN, o guardalo con «heimdall login» en {}",
+                file.display()
+            )
+        })
+}
+
+fn token_file() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    Path::new(&home).join(".heimdall").join("token")
+}
+
 fn flag(args: &[String], name: &str) -> Option<String> {
-    let index = args.iter().position(|arg| arg == name)?;
-    args.get(index + 1).cloned()
+    let prefix = format!("{name}=");
+    for (index, arg) in args.iter().enumerate() {
+        if arg == name {
+            return args.get(index + 1).cloned();
+        }
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn required(args: &[String], name: &str) -> Result<String, String> {
@@ -311,6 +461,41 @@ mod tests {
     }
 
     #[test]
+    fn flags_also_read_the_value_after_an_equals_sign() {
+        let args = args("run --config=dev -- echo hola");
+        assert_eq!(flag(&args, "--config").unwrap(), "dev");
+    }
+
+    #[test]
+    fn the_doppler_short_flags_work() {
+        let args = args("run -p picsel -c dev -- echo hola");
+        assert_eq!(pick(&args, &["--project", "-p"], None).unwrap(), "picsel");
+        assert_eq!(pick(&args, &["--config", "-c"], None).unwrap(), "dev");
+    }
+
+    #[test]
+    fn a_flag_beats_the_setup_file() {
+        let args = args("run -c prd -- echo hola");
+        let env = pick(&args, &["--config", "-c"], Some("dev".to_string()));
+        assert_eq!(env.unwrap(), "prd");
+    }
+
+    #[test]
+    fn the_setup_file_fills_what_the_flags_leave_out() {
+        let args = args("run -- echo hola");
+        let env = pick(&args, &["--config", "-c"], Some("dev".to_string()));
+        assert_eq!(env.unwrap(), "dev");
+    }
+
+    #[test]
+    fn the_setup_file_gives_the_project_and_the_environment() {
+        let text = "setup:\n  - project: picsel\n    config: dev\n";
+        assert_eq!(yaml_value(text, "project").unwrap(), "picsel");
+        assert_eq!(yaml_value(text, "config").unwrap(), "dev");
+        assert!(yaml_value(text, "token").is_none());
+    }
+
+    #[test]
     fn the_command_goes_after_the_separator() {
         let args = args("run --project bifrost --env dev -- echo hola mundo");
         let separator = args.iter().position(|arg| arg == "--").unwrap();
@@ -318,8 +503,15 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_flag_does_not_move_the_separator() {
+        let args = args("run --preserve-env --preserve-env -- echo hola");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(args[separator + 1..].join(" "), "echo hola");
+    }
+
+    #[test]
     fn a_missing_flag_is_an_error() {
-        assert!(required(&args("ls"), "--project").is_err());
+        assert!(flag(&args("ls"), "--project").is_none());
     }
 
     #[test]

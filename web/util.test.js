@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { segundos, describir, hace, falta, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
+const { segundos, describir, hace, falta, agrupar, esSlug, clavesDe, comoEnv, paresDeEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
 
 test("el vencimiento se escribe con su unidad", () => {
   assert.equal(segundos("30s"), 30);
@@ -90,4 +90,29 @@ test("el alcance de un token dice qué toca", () => {
   );
   assert.equal(alcanceDeToken({ admin: true, project: "", env: "" }), "administra");
   assert.equal(alcanceDeToken({ admin: true, keys: ["A"] }), "administra · sólo A");
+});
+
+test("un .env se lee línea por línea, salteando vacías y comentarios", () => {
+  const { pares, rotas } = paresDeEnv("A=1\n\n# un comentario\nB=dos\n");
+  assert.deepEqual(pares, { A: "1", B: "dos" });
+  assert.deepEqual(rotas, []);
+});
+
+test("las comillas y los escapes se sacan solos", () => {
+  assert.deepEqual(paresDeEnv('A="dos palabras"').pares, { A: "dos palabras" });
+  assert.deepEqual(paresDeEnv("A='crudo $x'").pares, { A: "crudo $x" });
+  assert.deepEqual(paresDeEnv('A="linea\\nueva"').pares, { A: "linea\nueva" });
+  assert.deepEqual(paresDeEnv("A=sin # comentario").pares, { A: "sin" });
+});
+
+test("el primer = parte la línea y lo que no se entiende se junta aparte", () => {
+  const { pares, rotas } = paresDeEnv("URL=a=b\nlo que sea\n1MALA=x\n=suelta\n");
+  assert.deepEqual(pares, { URL: "a=b" });
+  assert.deepEqual(rotas, ["lo que sea", "1MALA=x", "=suelta"]);
+});
+
+test("un .env vacío no inventa nada", () => {
+  const { pares, rotas } = paresDeEnv("");
+  assert.deepEqual(pares, {});
+  assert.deepEqual(rotas, []);
 });

@@ -42,6 +42,7 @@
           <h3>Claves</h3>
           <span id="cuenta-secretos" class="pildora"></span>
           <span class="empuje"></span>
+          <button id="importar" class="fantasma">pegar .env</button>
           <button id="env" class="fantasma">copiar .env</button>
           <button id="refrescar" class="fantasma">refrescar</button>
         </div>
@@ -95,6 +96,15 @@
   <menu>
     <button type="button" id="confirmar-no" class="fantasma">Cancelar</button>
     <button type="button" id="confirmar-si" class="peligro">Borrar</button>
+  </menu>
+</dialog>
+
+<dialog id="pegar">
+  <p>Pegá un .env: una <code>CLAVE=valor</code> por línea. Lo que ya exista se pisa.</p>
+  <textarea id="pegar-texto" rows="12" spellcheck="false" autocomplete="off" placeholder="CLAVE=valor"></textarea>
+  <menu>
+    <button type="button" id="pegar-no" class="fantasma">Cancelar</button>
+    <button type="button" id="pegar-si">Importar</button>
   </menu>
 </dialog>
 
