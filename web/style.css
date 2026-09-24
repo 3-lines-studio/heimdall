@@ -50,8 +50,9 @@ h1 {
 }
 
 h2 {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 h3 {
@@ -65,19 +66,64 @@ h3 {
 #quien {
   flex: 1;
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #app {
   padding: 16px;
+  min-width: 0;
 }
 
-#entornos {
-  display: flex;
-  gap: 8px;
+#app > * {
+  min-width: 0;
+}
+
+#lateral {
   padding-bottom: 12px;
   margin-bottom: 12px;
-  overflow-x: auto;
   border-bottom: 1px solid var(--borde);
+}
+
+#nuevo-proyecto {
+  margin-bottom: 8px;
+}
+
+.proyecto {
+  margin-bottom: 2px;
+}
+
+.proyecto .titulo {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.proyecto .titulo input {
+  width: 100%;
+}
+
+.proyecto .nombre {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.entornos {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+
+.fila-entorno {
+  display: flex;
 }
 
 button {
@@ -100,17 +146,62 @@ button:hover {
   background: transparent;
 }
 
+.chico {
+  padding: 1px 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  background: transparent;
+  border-color: transparent;
+  color: var(--tenue);
+}
+
+.chico:hover {
+  border-color: var(--borde);
+  color: var(--texto);
+}
+
 .peligro {
   color: var(--peligro);
 }
 
+.plegar {
+  padding: 0 2px;
+  font-size: 12px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--tenue);
+}
+
 .entorno {
-  white-space: nowrap;
+  text-align: left;
+  padding: 5px 10px;
+  font-size: 14px;
 }
 
 .entorno.activo {
   border-color: var(--acento);
   color: var(--acento);
+}
+
+input.chico,
+#confirmar input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 14px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--panel);
+  color: var(--texto);
+}
+
+.encabezado {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 table {
@@ -145,18 +236,9 @@ td.clave {
 
 td.acciones {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
-}
-
-#primer:not([hidden]) {
-  display: grid;
-  gap: 4px;
-  max-width: 640px;
-}
-
-#primer p {
-  margin: 0 0 4px;
 }
 
 .linea {
@@ -264,27 +346,55 @@ td.acciones {
   border: 1px solid var(--borde);
   border-radius: var(--radio);
   background: var(--panel);
+  z-index: 3;
+}
+
+dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--borde);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--texto);
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+dialog p {
+  margin: 0 0 12px;
+}
+
+dialog label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--tenue);
+}
+
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
 }
 
 @media (min-width: 760px) {
   #app {
     display: grid;
-    grid-template-columns: 220px 1fr;
-    gap: 24px;
+    grid-template-columns: 240px 1fr;
+    gap: 32px;
     max-width: 1100px;
     margin: 0 auto;
   }
 
-  #entornos {
-    flex-direction: column;
-    padding: 0 12px 0 0;
+  #lateral {
+    padding: 0 16px 0 0;
+    margin: 0;
     border-right: 1px solid var(--borde);
     border-bottom: 0;
-    overflow: visible;
-  }
-
-  .entorno {
-    text-align: left;
   }
 
   .flotante {

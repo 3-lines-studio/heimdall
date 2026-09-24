@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { segundos, clavesDe, comoEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
+const { segundos, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
 
 test("el vencimiento se escribe con su unidad", () => {
   assert.equal(segundos("30s"), 30);
@@ -16,6 +16,24 @@ test("un vencimiento que no se entiende no es un número", () => {
   assert.equal(segundos(""), null);
   assert.equal(segundos("0h"), null);
   assert.equal(segundos("-2h"), null);
+});
+
+test("los entornos se agrupan por proyecto y salen ordenados", () => {
+  assert.deepEqual(agrupar(["bifrost/prod", "bifrost/dev", "axe/dev"]), {
+    bifrost: ["dev", "prod"],
+    axe: ["dev"],
+  });
+  assert.deepEqual(agrupar([]), {});
+});
+
+test("el nombre de un proyecto o entorno es un slug", () => {
+  assert.equal(esSlug("bifrost"), true);
+  assert.equal(esSlug("mi-proyecto_2"), true);
+  assert.equal(esSlug("Mi Proyecto"), false);
+  assert.equal(esSlug("odín"), false);
+  assert.equal(esSlug(""), false);
+  assert.equal(esSlug("con/barras"), false);
+  assert.equal(esSlug("a".repeat(65)), false);
 });
 
 test("las claves se separan por coma y se limpian", () => {
