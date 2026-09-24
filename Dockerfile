@@ -4,6 +4,7 @@ RUN rustup toolchain install nightly --profile minimal && rustup default nightly
 WORKDIR /build/heimdall
 COPY Cargo.toml Cargo.lock /build/heimdall/
 COPY src /build/heimdall/src
+COPY web /build/heimdall/web
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
