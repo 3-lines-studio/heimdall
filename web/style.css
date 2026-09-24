@@ -549,6 +549,22 @@ dialog label {
   color: var(--tenue);
 }
 
+#pegar {
+  width: min(560px, calc(100vw - 32px));
+}
+
+dialog textarea {
+  width: 100%;
+  min-height: 170px;
+  padding: 8px 10px;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--fondo);
+  color: var(--texto);
+  resize: vertical;
+}
+
 dialog menu {
   display: flex;
   justify-content: flex-end;

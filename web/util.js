@@ -76,6 +76,39 @@ function comoEnv(secretos) {
     .join("\n");
 }
 
+function valorDeEnv(texto) {
+  const valor = texto.trim();
+  if (valor.length >= 2 && valor[0] === '"' && valor.endsWith('"')) {
+    return valor
+      .slice(1, -1)
+      .replace(/\\(.)/g, (todo, letra) =>
+        letra === "n" ? "\n" : letra === "r" ? "\r" : letra === "t" ? "\t" : letra
+      );
+  }
+  if (valor.length >= 2 && valor[0] === "'" && valor.endsWith("'")) {
+    return valor.slice(1, -1);
+  }
+  const comentario = valor.indexOf(" #");
+  return comentario === -1 ? valor : valor.slice(0, comentario).trimEnd();
+}
+
+function paresDeEnv(texto) {
+  const pares = {};
+  const rotas = [];
+  for (const linea of String(texto).split("\n")) {
+    const limpia = linea.trim();
+    if (!limpia || limpia.startsWith("#")) continue;
+    const corte = limpia.indexOf("=");
+    const clave = corte === -1 ? "" : limpia.slice(0, corte).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(clave)) {
+      rotas.push(limpia);
+      continue;
+    }
+    pares[clave] = valorDeEnv(limpia.slice(corte + 1));
+  }
+  return { pares, rotas };
+}
+
 function urlDeClaves(project, env) {
   return `/v1/secrets?project=${encodeURIComponent(project)}&env=${encodeURIComponent(env)}`;
 }
@@ -87,5 +120,5 @@ function alcanceDeToken(token) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { segundos, describir, hace, falta, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken };
+  module.exports = { segundos, describir, hace, falta, agrupar, esSlug, clavesDe, comoEnv, paresDeEnv, urlDeClaves, alcanceDeToken };
 }
