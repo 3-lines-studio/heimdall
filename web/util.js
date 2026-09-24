@@ -9,6 +9,21 @@ function segundos(texto) {
   return numero * unidad;
 }
 
+function agrupar(nombres) {
+  const proyectos = {};
+  for (const nombre of nombres) {
+    const [project, env] = nombre.split("/");
+    if (!proyectos[project]) proyectos[project] = [];
+    proyectos[project].push(env);
+  }
+  for (const entornos of Object.values(proyectos)) entornos.sort();
+  return proyectos;
+}
+
+function esSlug(texto) {
+  return /^[a-z0-9_-]{1,64}$/.test(texto);
+}
+
 function clavesDe(texto) {
   return String(texto)
     .split(",")
@@ -34,5 +49,5 @@ function alcanceDeToken(token) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { segundos, clavesDe, comoEnv, urlDeClaves, alcanceDeToken };
+  module.exports = { segundos, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken };
 }

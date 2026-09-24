@@ -15,26 +15,22 @@
 </header>
 
 <main id="app">
-  <nav id="entornos" aria-label="Proyectos y entornos"></nav>
+  <nav id="lateral" aria-label="Proyectos y entornos">
+    <button id="nuevo-proyecto" class="fantasma">+ proyecto</button>
+    <div id="proyectos"></div>
+  </nav>
 
   <section id="panel">
     <p id="vacio" class="tenue">Elegí un entorno.</p>
 
-    <form id="primer" hidden>
-      <p class="tenue">Todavía no hay nada. El proyecto y el entorno se crean con el primer secreto: minúsculas, números, guiones.</p>
-      <div class="linea">
-        <input id="primer-project" placeholder="proyecto" autocomplete="off" spellcheck="false" required>
-        <input id="primer-env" placeholder="entorno, por ejemplo dev" autocomplete="off" spellcheck="false" required>
-      </div>
-      <div class="linea">
-        <input id="primer-clave" placeholder="CLAVE" autocomplete="off" spellcheck="false" required>
-        <input id="primer-valor" placeholder="valor" autocomplete="off" spellcheck="false" required>
-      </div>
-      <p class="acciones"><button>Crear y guardar</button></p>
-    </form>
-
     <div id="contenido" hidden>
-      <h2 id="titulo"></h2>
+      <div class="encabezado">
+        <h2 id="titulo"></h2>
+        <div class="acciones">
+          <button id="renombrar-entorno" class="fantasma">renombrar</button>
+          <button id="borrar-entorno" class="fantasma peligro">borrar</button>
+        </div>
+      </div>
 
       <table>
         <thead><tr><th>Clave</th><th>Valor</th><th></th></tr></thead>
@@ -66,6 +62,16 @@
     </div>
   </section>
 </main>
+
+<dialog id="confirmar">
+  <p id="confirmar-texto"></p>
+  <label id="confirmar-etiqueta" for="confirmar-nombre">Escribí el nombre del proyecto para confirmar</label>
+  <input id="confirmar-nombre" autocomplete="off" spellcheck="false">
+  <menu>
+    <button type="button" id="confirmar-no" class="fantasma">Cancelar</button>
+    <button type="button" id="confirmar-si" class="peligro">Borrar</button>
+  </menu>
+</dialog>
 
 <p id="aviso" class="aviso flotante" hidden></p>
 <script src="/util.js"></script>
