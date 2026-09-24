@@ -6,6 +6,9 @@ use std::sync::Arc;
 
 const INDEX: &str = include_str!("../web/index.html");
 const LOGIN: &str = include_str!("../web/login.html");
+const LOGIN_JS: &str = include_str!("../web/login.js");
+const AUTH: &str = include_str!("../web/auth.html");
+const AUTH_JS: &str = include_str!("../web/auth.js");
 const APP: &str = include_str!("../web/app.js");
 const UTIL: &str = include_str!("../web/util.js");
 const STYLE: &str = include_str!("../web/style.css");
@@ -16,6 +19,7 @@ const CSS: &str = "text/css; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const LOGIN_TTL: i64 = 900;
+const COOLDOWN: i64 = 60;
 const SESSION_TTL: i64 = 30 * 24 * 60 * 60;
 
 pub fn handle(
@@ -26,12 +30,15 @@ pub fn handle(
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => app(server, request, stream),
         ("GET", "/login") => http::send_text(stream, 200, HTML, &versioned(LOGIN)),
+        ("GET", "/login.js") => asset(stream, JS, LOGIN_JS.as_bytes()),
+        ("GET", "/auth") => http::send_text(stream, 200, HTML, &versioned(AUTH)),
+        ("GET", "/auth.js") => asset(stream, JS, AUTH_JS.as_bytes()),
         ("GET", "/app.js") => asset(stream, JS, APP.as_bytes()),
         ("GET", "/util.js") => asset(stream, JS, UTIL.as_bytes()),
         ("GET", "/style.css") => asset(stream, CSS, STYLE.as_bytes()),
         ("GET", "/icon.svg") => asset(stream, "image/svg+xml", ICON.as_bytes()),
         ("POST", "/api/login") => ask_for_link(server, request, stream),
-        ("GET", "/auth") => enter(server, request, stream),
+        ("POST", "/api/enter") => enter(server, request, stream),
         ("POST", "/api/logout") => leave(server, request, stream),
         ("GET", "/api/me") => me(server, request, stream),
         _ => http::send_text(stream, 404, "text/plain", "no está"),
@@ -69,12 +76,15 @@ fn ask_for_link(
     let link = {
         let store = server.store.lock().unwrap_or_else(|e| e.into_inner());
         let _ = store.sweep();
+        if store.asked_recently(&email, COOLDOWN).unwrap_or(false) {
+            return http::send_json(stream, 200, &answer);
+        }
         match store.create_login(&email, LOGIN_TTL) {
             Ok(link) => link,
             Err(_) => return http::send_error(stream, 500, "no pude armar el link"),
         }
     };
-    let url = format!("{}/auth?token={link}", server.link_base);
+    let url = format!("{}/auth#token={link}", server.link_base);
     match &server.mail {
         Some(mail) => {
             if let Err(e) = mail.send_link(&email, &url) {
@@ -89,19 +99,18 @@ fn ask_for_link(
     http::send_json(stream, 200, &answer)
 }
 
+/// El token llega en el cuerpo y no en la URL: el fragmento del link no viaja
+/// al servidor, así que no queda en ningún log.
 fn enter(server: &Arc<Server>, request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
-    let email = request.param("token").and_then(|token| {
+    let Some(token) = request.field("token") else {
+        return http::send_error(stream, 400, "falta el token");
+    };
+    let email = {
         let store = server.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.consume_login(token).ok()
-    });
-    let Some(email) = email else {
-        return http::respond(
-            stream,
-            303,
-            "text/plain",
-            &[("Location", "/login?error=1")],
-            b"",
-        );
+        store.consume_login(&token)
+    };
+    let Ok(email) = email else {
+        return http::send_error(stream, 401, "ese link ya no sirve");
     };
     let session = {
         let store = server.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -112,12 +121,11 @@ fn enter(server: &Arc<Server>, request: &Request, stream: &mut TcpStream) -> std
     let cookie = format!(
         "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age={SESSION_TTL}"
     );
-    http::respond(
+    http::send_json_with(
         stream,
-        303,
-        "text/plain",
-        &[("Location", "/"), ("Set-Cookie", &cookie)],
-        b"",
+        200,
+        &json!({ "ok": true }),
+        &[("Set-Cookie", &cookie)],
     )
 }
 
@@ -155,6 +163,8 @@ fn versioned(page: &str) -> String {
     let version = std::env::var("RAILWAY_GIT_COMMIT_SHA").unwrap_or_default();
     page.replace("/app.js", &format!("/app.js?v={version}"))
         .replace("/util.js", &format!("/util.js?v={version}"))
+        .replace("/login.js", &format!("/login.js?v={version}"))
+        .replace("/auth.js", &format!("/auth.js?v={version}"))
         .replace("/style.css", &format!("/style.css?v={version}"))
         .replace("/icon.svg", &format!("/icon.svg?v={version}"))
 }

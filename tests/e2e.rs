@@ -364,6 +364,20 @@ fn cookie_of(response: &str) -> Option<String> {
         })
 }
 
+fn enter(running: &Running, token: &str) -> (u16, Option<String>) {
+    let host = running.url.trim_start_matches("http://");
+    let body = format!(r#"{{"token":"{token}"}}"#);
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    let request = format!(
+        "POST /api/enter HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    (status_of(&response), cookie_of(&response))
+}
+
 fn with_cookie(running: &Running, path: &str, cookie: &str) -> (u16, Value) {
     let url = format!("{}{}", running.url, path);
     match ureq::get(&url).set("Cookie", cookie).call() {
@@ -399,11 +413,17 @@ fn the_magic_link_opens_a_session() {
         Some(json!({ "email": "berti@ejemplo.com" })),
     );
     let link = asked["link"].as_str().expect("sin link").to_string();
+    assert!(link.contains("/auth#token="), "{link}");
     let token = link.split("token=").nth(1).expect("sin token");
 
-    let entered = raw(&running, &format!("/auth?token={token}"), None);
-    assert_eq!(status_of(&entered), 303);
-    let session = cookie_of(&entered).expect("sin cookie");
+    let (status, cookie) = enter(&running, token);
+    assert_eq!(status, 200);
+    let session = cookie
+        .expect("sin cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
 
     let (status, me) = with_cookie(&running, "/api/me", &session);
     assert_eq!(status, 200);
@@ -412,10 +432,56 @@ fn the_magic_link_opens_a_session() {
     let (status, _) = with_cookie(&running, "/v1/environments", &session);
     assert_eq!(status, 200);
 
-    assert_eq!(
-        status_of(&raw(&running, &format!("/auth?token={token}"), None)),
-        303
-    );
+    assert_eq!(enter(&running, token).0, 401);
     let (status, _) = with_cookie(&running, "/api/me", "heimdall_session=nada");
     assert_eq!(status, 401);
+}
+
+#[test]
+fn a_second_link_to_the_same_address_waits() {
+    let running = start();
+    wait_for(&running);
+
+    let (_, first) = call(
+        &running,
+        "POST",
+        "/api/login",
+        "nada",
+        Some(json!({ "email": "berti@ejemplo.com" })),
+    );
+    assert!(first["link"].as_str().is_some());
+
+    let (status, second) = call(
+        &running,
+        "POST",
+        "/api/login",
+        "nada",
+        Some(json!({ "email": "berti@ejemplo.com" })),
+    );
+    assert_eq!(status, 200);
+    assert!(second["link"].is_null());
+}
+
+#[test]
+fn a_giant_header_does_not_take_the_server_down() {
+    let running = start();
+    wait_for(&running);
+
+    let host = running.url.trim_start_matches("http://").to_string();
+    let mut stream = std::net::TcpStream::connect(&host).unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Relleno: ".to_vec();
+    request.extend(std::iter::repeat_n(b'A', 256 * 1024));
+    let _ = stream.write_all(&request);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut respuesta = Vec::new();
+    let _ = stream.read_to_end(&mut respuesta);
+    assert!(respuesta.is_empty(), "contestó algo: {}", respuesta.len());
+
+    let (status, _) = call(&running, "GET", "/v1/health", "nada", None);
+    assert_eq!(status, 200);
 }

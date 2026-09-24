@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key as CipherKey, XChaCha20Poly1305, XNonce};
 
 const NONCE: usize = 24;
@@ -24,12 +24,12 @@ impl Key {
         Key(blake3::derive_key(context, &self.0))
     }
 
-    pub fn seal(&self, plain: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn seal(&self, plain: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
         let cipher = XChaCha20Poly1305::new(CipherKey::from_slice(&self.0));
         let mut nonce = [0u8; NONCE];
         getrandom::getrandom(&mut nonce).map_err(|e| format!("no hay azar: {e}"))?;
         let sealed = cipher
-            .encrypt(XNonce::from_slice(&nonce), plain)
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
             .map_err(|_| "no pude cifrar".to_string())?;
         let mut blob = Vec::with_capacity(NONCE + sealed.len());
         blob.extend_from_slice(&nonce);
@@ -37,13 +37,19 @@ impl Key {
         Ok(blob)
     }
 
-    pub fn open(&self, blob: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn open(&self, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
         if blob.len() <= NONCE {
             return Err("el archivo cifrado está cortado".to_string());
         }
         let cipher = XChaCha20Poly1305::new(CipherKey::from_slice(&self.0));
         cipher
-            .decrypt(XNonce::from_slice(&blob[..NONCE]), &blob[NONCE..])
+            .decrypt(
+                XNonce::from_slice(&blob[..NONCE]),
+                Payload {
+                    msg: &blob[NONCE..],
+                    aad,
+                },
+            )
             .map_err(|_| "no pude descifrar: ¿cambió la master key?".to_string())
     }
 }
@@ -104,34 +110,48 @@ mod tests {
 
     #[test]
     fn seal_and_open_round_trip() {
-        let blob = key().seal(b"secreto").unwrap();
-        assert_eq!(key().open(&blob).unwrap(), b"secreto");
+        let blob = key().seal(b"secreto", b"donde").unwrap();
+        assert_eq!(key().open(&blob, b"donde").unwrap(), b"secreto");
         assert!(!blob.windows(7).any(|w| w == b"secreto"));
     }
 
     #[test]
     fn each_seal_uses_a_fresh_nonce() {
-        assert_ne!(key().seal(b"x").unwrap(), key().seal(b"x").unwrap());
+        assert_ne!(
+            key().seal(b"x", b"a").unwrap(),
+            key().seal(b"x", b"a").unwrap()
+        );
     }
 
     #[test]
     fn another_key_does_not_open() {
-        let blob = key().seal(b"secreto").unwrap();
+        let blob = key().seal(b"secreto", b"donde").unwrap();
         let other = Key::from_hex(&"cd".repeat(32)).unwrap();
-        assert!(other.open(&blob).is_err());
+        assert!(other.open(&blob, b"donde").is_err());
     }
 
     #[test]
     fn a_context_does_not_open_another() {
         let key = key();
-        let blob = key.derive("proyecto/a").seal(b"x").unwrap();
-        assert_eq!(key.derive("proyecto/a").open(&blob).unwrap(), b"x");
-        assert!(key.derive("proyecto/b").open(&blob).is_err());
+        let blob = key.derive("proyecto/a").seal(b"x", b"donde").unwrap();
+        assert_eq!(
+            key.derive("proyecto/a").open(&blob, b"donde").unwrap(),
+            b"x"
+        );
+        assert!(key.derive("proyecto/b").open(&blob, b"donde").is_err());
+    }
+
+    #[test]
+    fn a_blob_does_not_open_under_another_name() {
+        let blob = key().seal(b"secreto", b"bifrost/dev/ALFA").unwrap();
+        assert_eq!(key().open(&blob, b"bifrost/dev/ALFA").unwrap(), b"secreto");
+        assert!(key().open(&blob, b"bifrost/dev/BETA").is_err());
+        assert!(key().open(&blob, b"").is_err());
     }
 
     #[test]
     fn truncated_blobs_do_not_open() {
-        assert!(key().open(b"corto").is_err());
+        assert!(key().open(b"corto", b"a").is_err());
     }
 
     #[test]

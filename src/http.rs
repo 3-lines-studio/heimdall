@@ -2,7 +2,18 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
+pub const MAX_LINE: usize = 8 * 1024;
+pub const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_BODY: usize = 1024 * 1024;
+
+const SECURITY: &[(&str, &str)] = &[
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    ),
+];
 
 pub struct Request {
     pub method: String,
@@ -69,12 +80,11 @@ impl Request {
 }
 
 pub fn read(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    let mut reader = BufReader::new((&mut *stream).take((MAX_HEAD + MAX_BODY) as u64));
+    let Some(first) = read_line(&mut reader)? else {
         return Ok(None);
-    }
-    let mut parts = line.trim_end().split(' ');
+    };
+    let mut parts = first.trim_end().split(' ');
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
     let (path, query) = match target.split_once('?') {
@@ -82,16 +92,17 @@ pub fn read(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
         None => (target, HashMap::new()),
     };
     let mut headers = HashMap::new();
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
+    let mut head = first.len();
+    while let Some(line) = read_line(&mut reader)? {
+        head += line.len();
+        if head > MAX_HEAD {
+            return Err(too_long("encabezado"));
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
             break;
         }
-        let header = header.trim_end();
-        if header.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = header.split_once(':') {
+        if let Some((name, value)) = line.split_once(':') {
             headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
@@ -114,6 +125,27 @@ pub fn read(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }))
 }
 
+/// Una línea entera o nada: el tope está en el `Take`, así que una línea sin
+/// salto no puede hacer crecer el buffer más allá de eso.
+fn read_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    let read = reader.take(MAX_LINE as u64 + 1).read_line(&mut line)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.len() > MAX_LINE {
+        return Err(too_long("línea"));
+    }
+    Ok(Some(line))
+}
+
+fn too_long(what: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("{what} demasiado grande"),
+    )
+}
+
 pub fn respond(
     stream: &mut TcpStream,
     status: u16,
@@ -132,6 +164,9 @@ pub fn respond(
         .any(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
     {
         stream.write_all(b"Cache-Control: no-store\r\n")?;
+    }
+    for (name, value) in SECURITY {
+        write!(stream, "{name}: {value}\r\n")?;
     }
     stream.write_all(b"Connection: close\r\n")?;
     for (name, value) in extra {
