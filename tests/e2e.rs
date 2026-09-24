@@ -485,3 +485,85 @@ fn a_giant_header_does_not_take_the_server_down() {
     let (status, _) = call(&running, "GET", "/v1/health", "nada", None);
     assert_eq!(status, 200);
 }
+
+#[test]
+fn the_structure_lives_on_its_own() {
+    let running = start();
+    wait_for(&running);
+
+    let body = json!({ "project": "bifrost", "env": "dev" });
+    let (status, _) = call(&running, "POST", "/v1/environments", "hd_admin", Some(body));
+    assert_eq!(status, 200);
+
+    let (_, names) = call(&running, "GET", "/v1/environments", "hd_admin", None);
+    assert_eq!(names, json!(["bifrost/dev"]));
+
+    let renamed = json!({ "project": "bifrost", "env": "dev", "to": "testing" });
+    let (_, moved) = call(
+        &running,
+        "POST",
+        "/v1/rename-environment",
+        "hd_admin",
+        Some(renamed),
+    );
+    assert_eq!(moved["env"], "testing");
+
+    let (status, _) = call(
+        &running,
+        "DELETE",
+        "/v1/environments",
+        "hd_admin",
+        Some(json!({ "project": "bifrost", "env": "testing" })),
+    );
+    assert_eq!(status, 200);
+    let (_, names) = call(&running, "GET", "/v1/environments", "hd_admin", None);
+    assert_eq!(names, json!([]));
+}
+
+#[test]
+fn renaming_a_project_keeps_the_secrets_readable() {
+    let running = start();
+    wait_for(&running);
+
+    call(
+        &running,
+        "PUT",
+        "/v1/secrets",
+        "hd_admin",
+        Some(
+            json!({ "project": "bifrost", "env": "dev", "key": "STRIPE_KEY", "value": "sk_test_123" }),
+        ),
+    );
+    let (status, _) = call(
+        &running,
+        "POST",
+        "/v1/rename-project",
+        "hd_admin",
+        Some(json!({ "project": "bifrost", "to": "puente" })),
+    );
+    assert_eq!(status, 200);
+
+    let (status, secrets) = call(
+        &running,
+        "GET",
+        "/v1/secrets?project=puente&env=dev",
+        "hd_admin",
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(secrets["STRIPE_KEY"], "sk_test_123");
+
+    let (_, names) = call(&running, "GET", "/v1/environments", "hd_admin", None);
+    assert_eq!(names, json!(["puente/dev"]));
+
+    let (status, _) = call(
+        &running,
+        "DELETE",
+        "/v1/projects",
+        "hd_admin",
+        Some(json!({ "project": "puente" })),
+    );
+    assert_eq!(status, 200);
+    let (_, names) = call(&running, "GET", "/v1/environments", "hd_admin", None);
+    assert_eq!(names, json!([]));
+}
