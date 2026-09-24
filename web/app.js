@@ -544,6 +544,57 @@ $('alta').addEventListener('submit', async (evento) => {
 
 $('env').addEventListener('click', () => copiar(comoEnv(estado.secretos)));
 
+$('importar').addEventListener('click', importar);
+
+function pedirEnv() {
+  return new Promise((resolve) => {
+    const dialogo = $('pegar');
+    const campo = $('pegar-texto');
+    campo.value = '';
+    let texto = null;
+    $('pegar-si').onclick = () => {
+      texto = campo.value;
+      dialogo.close();
+    };
+    $('pegar-no').onclick = () => dialogo.close();
+    dialogo.addEventListener('close', () => resolve(texto), { once: true });
+    dialogo.showModal();
+    campo.focus();
+  });
+}
+
+async function importar() {
+  const texto = await pedirEnv();
+  if (texto === null) return;
+  const { pares, rotas } = paresDeEnv(texto);
+  const claves = Object.keys(pares);
+  if (!claves.length) {
+    aviso(rotas.length ? 'No pude leer ninguna línea.' : 'No pegaste nada.');
+    return;
+  }
+  let fallaron = 0;
+  for (const clave of claves) {
+    try {
+      await api('PUT', '/v1/secrets', {
+        project: estado.project,
+        env: estado.env,
+        key: clave,
+        value: pares[clave],
+      });
+    } catch {
+      fallaron++;
+    }
+  }
+  await abrir(estado.project, estado.env);
+  const guardadas = claves.length - fallaron;
+  const partes = [`${guardadas} ${guardadas === 1 ? 'clave' : 'claves'}`];
+  if (fallaron) partes.push(`${fallaron} sin guardar`);
+  if (rotas.length) {
+    partes.push(`${rotas.length} ${rotas.length === 1 ? 'línea' : 'líneas'} sin entender`);
+  }
+  aviso(partes.join(', '));
+}
+
 $('refrescar').addEventListener('click', () => abrir(estado.project, estado.env));
 
 $('solo-entorno').addEventListener('change', renderAuditoria);
