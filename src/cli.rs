@@ -40,6 +40,7 @@ heimdall — secretos por proyecto y entorno
   heimdall ls [--project X] [--env Y]
   heimdall environments
   heimdall token create --name N [--project X] [--env Y] [--keys A,B] [--ttl 2h]
+                        (el proyecto y el entorno aceptan «*»)
   heimdall token create --name N --admin [--ttl 24h]
   heimdall token list
   heimdall token revoke --id ID

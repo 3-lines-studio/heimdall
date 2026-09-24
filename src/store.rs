@@ -358,8 +358,8 @@ impl Store {
                 return bad("un token de administración ve todo");
             }
         } else {
-            slug(&new.project)?;
-            slug(&new.env)?;
+            slug_or_all(&new.project)?;
+            slug_or_all(&new.env)?;
         }
         if new.name.trim().is_empty() {
             return bad("el token necesita un nombre");
@@ -591,6 +591,13 @@ pub fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
+}
+
+fn slug_or_all(name: &str) -> Result<()> {
+    if name == "*" {
+        return Ok(());
+    }
+    slug(name)
 }
 
 pub fn slug(name: &str) -> Result<()> {

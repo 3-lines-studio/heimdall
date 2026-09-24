@@ -610,8 +610,8 @@ $('token-nuevo').addEventListener('submit', async (evento) => {
   evento.preventDefault();
   const cuerpo = {
     name: $('token-nombre').value.trim(),
-    project: estado.project,
-    env: estado.env,
+    project: $('token-todos-proyectos').checked ? '*' : estado.project,
+    env: $('token-todos-entornos').checked ? '*' : estado.env,
   };
   const claves = clavesDe($('token-claves').value);
   if (claves.length) cuerpo.keys = claves;
@@ -629,6 +629,8 @@ $('token-nuevo').addEventListener('submit', async (evento) => {
     $('token-nombre').value = '';
     $('token-claves').value = '';
     $('token-ttl').value = '';
+    $('token-todos-proyectos').checked = false;
+    $('token-todos-entornos').checked = false;
     $('token-nuevo').hidden = true;
     await cargarTokens();
     const caja = nodo('div', null, 'nuevo');
