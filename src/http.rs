@@ -36,6 +36,16 @@ impl Request {
         self.json()?.get(name)?.as_str().map(str::to_string)
     }
 
+    pub fn number(&self, name: &str) -> Option<i64> {
+        self.json()?.get(name)?.as_i64()
+    }
+
+    pub fn flag(&self, name: &str) -> bool {
+        self.json()
+            .and_then(|json| json.get(name).and_then(|value| value.as_bool()))
+            .unwrap_or(false)
+    }
+
     pub fn list(&self, name: &str) -> Option<Vec<String>> {
         let values = self.json()?.get(name)?.as_array()?.clone();
         Some(
@@ -145,6 +155,7 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }

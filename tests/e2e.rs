@@ -221,3 +221,111 @@ fn a_bad_token_is_rejected() {
     );
     assert_eq!(status, 401);
 }
+
+#[test]
+fn an_admin_token_can_be_created_and_used() {
+    let running = start();
+    wait_for(&running);
+
+    let (status, created) = call(
+        &running,
+        "POST",
+        "/v1/tokens",
+        "hd_admin",
+        Some(json!({ "name": "jimmy", "admin": true })),
+    );
+    assert_eq!(status, 200);
+    let admin = created["token"].as_str().unwrap().to_string();
+
+    let (status, _) = call(
+        &running,
+        "PUT",
+        "/v1/secrets",
+        &admin,
+        Some(json!({ "project": "axe", "env": "dev", "key": "A", "value": "1" })),
+    );
+    assert_eq!(status, 200);
+    let (status, secrets) = call(
+        &running,
+        "GET",
+        "/v1/secrets?project=axe&env=dev",
+        &admin,
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(secrets["A"], "1");
+}
+
+#[test]
+fn an_expired_token_stops_working() {
+    let running = start();
+    wait_for(&running);
+
+    let (status, created) = call(
+        &running,
+        "POST",
+        "/v1/tokens",
+        "hd_admin",
+        Some(json!({ "name": "agente", "project": "axe", "env": "dev", "ttl": -1 })),
+    );
+    assert_eq!(status, 200);
+    let agent = created["token"].as_str().unwrap().to_string();
+
+    let (status, error) = call(
+        &running,
+        "GET",
+        "/v1/secrets?project=axe&env=dev",
+        &agent,
+        None,
+    );
+    assert_eq!(status, 401);
+    assert!(error["error"].as_str().unwrap().contains("venció"));
+}
+
+#[test]
+fn reading_shows_up_in_the_audit() {
+    let running = start();
+    wait_for(&running);
+
+    call(
+        &running,
+        "PUT",
+        "/v1/secrets",
+        "hd_admin",
+        Some(json!({ "project": "axe", "env": "dev", "key": "A", "value": "1" })),
+    );
+    let (_, created) = call(
+        &running,
+        "POST",
+        "/v1/tokens",
+        "hd_admin",
+        Some(json!({ "name": "agente", "project": "axe", "env": "dev" })),
+    );
+    let agent = created["token"].as_str().unwrap().to_string();
+    call(
+        &running,
+        "GET",
+        "/v1/secrets?project=axe&env=dev",
+        &agent,
+        None,
+    );
+
+    let (status, log) = call(&running, "GET", "/v1/audit?limit=10", "hd_admin", None);
+    assert_eq!(status, 200);
+    let reads: Vec<&str> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["action"].as_str().unwrap())
+        .filter(|action| action.starts_with("get-"))
+        .collect();
+    assert_eq!(reads, vec!["get-secrets"]);
+    let reader = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["action"] == "get-secrets")
+        .unwrap();
+    assert_eq!(reader["actor"], "agente");
+    assert_eq!(reader["env"], "dev");
+}

@@ -16,7 +16,8 @@ Nobody gets into the service. The only way to a secret is the API, with a token.
   services exist.
 - Tokens are stored hashed, with their scope. A token for `bifrost/dev` cannot
   read `bifrost/prod`: no request returns it, and asking for it is a 403.
-- The audit log records who touched what, never a value.
+- The audit log records who read what, who wrote it and who asked for a token.
+  Never a value.
 
 ## The service
 
@@ -29,6 +30,10 @@ PORT=8080
 
 `HEIMDALL_MASTER_KEY` is 32 bytes in hex. Change it and nothing opens again.
 
+`HEIMDALL_ADMIN_TOKEN` is the way in before any token exists. Create a real
+admin token with `--admin --ttl` and keep the environment one as the
+break-glass key.
+
 `heimdall` with no arguments serves; `heimdall serve` does the same.
 
 ## The client
@@ -40,7 +45,8 @@ export HEIMDALL_TOKEN=<the admin token, or an agent one>
 heimdall set STRIPE_KEY=sk_test_1 --project bifrost --env dev
 heimdall ls --project bifrost --env dev
 heimdall environments
-heimdall token create --name agente --project bifrost --env dev --keys STRIPE_KEY
+heimdall token create --name agente --project bifrost --env dev --keys STRIPE_KEY --ttl 1h
+heimdall token create --name jimmy --admin --ttl 24h
 heimdall token list
 heimdall token revoke --id 3f9c1a
 heimdall audit
@@ -61,11 +67,18 @@ heimdall run --project bifrost --env dev -- npm test
 | `DELETE /v1/secrets` | admin | `{project,env,key}` |
 | `GET /v1/environments` | admin | every `project/env` that exists |
 | `GET /v1/tokens` | admin | the tokens, without their secrets |
-| `POST /v1/tokens` | admin | `{name,project,env,keys?}`, returns the token once |
+| `POST /v1/tokens` | admin | `{name,project,env,keys?,admin?,ttl?}`, returns the token once |
 | `DELETE /v1/tokens?id=` | admin | revoke |
-| `GET /v1/audit` | admin | the log |
+| `GET /v1/audit` | admin | `?limit=`, newest first |
 
-Tokens go in `Authorization: Bearer <token>`.
+Tokens go in `Authorization: Bearer <token>`. They expire only if you gave them a `ttl`, in seconds.
+
+## Limits
+
+- 64 connections at a time, each one giving up after 15 seconds. Past that the
+  answer is a 503, not another thread.
+- Bodies up to 1 MB, single values up to 64 KB.
+- The audit endpoint answers the newest 500 unless you pass another `limit`.
 
 ## Development
 

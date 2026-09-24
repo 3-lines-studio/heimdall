@@ -1,10 +1,16 @@
 use crate::crypto;
 use crate::http::{self, Request};
-use crate::store::{Store, Token};
+use crate::store::{self, Error, NewToken, Store, Token};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const MAX_LIVE: usize = 64;
+const TIMEOUT: Duration = Duration::from_secs(15);
+const AUDIT_LIMIT: usize = 500;
 
 type Reply = Result<Value, (u16, String)>;
 
@@ -14,28 +20,54 @@ pub struct Server {
 }
 
 enum Actor {
-    Admin,
+    Admin(String),
     Token(Box<Token>),
 }
 
 impl Actor {
     fn label(&self) -> &str {
         match self {
-            Actor::Admin => "admin",
+            Actor::Admin(name) => name,
             Actor::Token(token) => &token.name,
         }
     }
 }
 
-pub fn listen(port: u16) -> Result<TcpListener, String> {
+pub fn listen(port: u16) -> std::result::Result<TcpListener, String> {
     TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("no pude escuchar en {port}: {e}"))
 }
 
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+struct Slot;
+
+impl Slot {
+    fn take() -> Option<Slot> {
+        if LIVE.fetch_add(1, Ordering::SeqCst) >= MAX_LIVE {
+            LIVE.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub fn serve(server: Arc<Server>, listener: TcpListener) {
-    for stream in listener.incoming().flatten() {
+    for mut stream in listener.incoming().flatten() {
+        let _ = stream.set_read_timeout(Some(TIMEOUT));
+        let _ = stream.set_write_timeout(Some(TIMEOUT));
+        let Some(slot) = Slot::take() else {
+            let _ = http::send_error(&mut stream, 503, "estoy lleno, probá en un rato");
+            continue;
+        };
         let server = server.clone();
         std::thread::spawn(move || {
-            let mut stream = stream;
+            let _slot = slot;
             if let Err(e) = handle(&server, &mut stream) {
                 eprintln!("heimdall: {e}");
             }
@@ -69,18 +101,25 @@ fn route(server: &Arc<Server>, store: &Store, request: &Request) -> Reply {
         ("DELETE", "/v1/secrets") => delete_secret(store, &actor, request),
         ("GET", "/v1/environments") => {
             admin(&actor)?;
-            Ok(json!(store.names().map_err(bad_request)?))
+            let names = reply(store.names())?;
+            reply(store.audit(actor.label(), "get-environments", "", "", None))?;
+            Ok(json!(names))
         }
         ("GET", "/v1/tokens") => {
             admin(&actor)?;
-            let tokens = store.tokens().map_err(bad_request)?;
+            let tokens = reply(store.tokens())?;
+            reply(store.audit(actor.label(), "get-tokens", "", "", None))?;
             Ok(json!(tokens))
         }
         ("POST", "/v1/tokens") => create_token(store, &actor, request),
         ("DELETE", "/v1/tokens") => revoke_token(store, &actor, request),
         ("GET", "/v1/audit") => {
             admin(&actor)?;
-            Ok(json!(store.audit_log().map_err(bad_request)?))
+            let limit = request
+                .param("limit")
+                .and_then(|limit| limit.parse().ok())
+                .unwrap_or(AUDIT_LIMIT);
+            Ok(json!(reply(store.audit_log(limit))?))
         }
         _ => Err((404, "no está".to_string())),
     }
@@ -90,31 +129,51 @@ fn authenticate(
     server: &Arc<Server>,
     store: &Store,
     request: &Request,
-) -> Result<Actor, (u16, String)> {
+) -> std::result::Result<Actor, (u16, String)> {
     let Some(presented) = request.bearer() else {
         return Err((401, "falta el token".to_string()));
     };
     if crypto::equal(presented, &server.admin) {
-        return Ok(Actor::Admin);
+        return Ok(Actor::Admin("admin".to_string()));
     }
-    let found = store.find(presented).map_err(bad_request)?;
-    let Some(token) = found else {
-        return Err((401, "ese token no sirve".to_string()));
+    let token = match store.find(presented) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Err((401, "ese token no sirve".to_string())),
+        Err(Error::Bad(message)) => return Err((401, message)),
+        Err(error) => return Err(internal(error)),
     };
     let _ = store.touch(&token.id);
+    if token.admin {
+        return Ok(Actor::Admin(token.name.clone()));
+    }
     Ok(Actor::Token(Box::new(token)))
 }
 
-fn admin(actor: &Actor) -> Result<(), (u16, String)> {
+fn reply<T>(result: store::Result<T>) -> std::result::Result<T, (u16, String)> {
+    result.map_err(|error| match error {
+        Error::Bad(message) => (400, message),
+        Error::Internal(message) => internal(Error::Internal(message)),
+    })
+}
+
+fn internal(error: Error) -> (u16, String) {
+    let Error::Internal(message) = error else {
+        return (500, "algo se rompió acá adentro".to_string());
+    };
+    eprintln!("heimdall: {message}");
+    (500, "algo se rompió acá adentro".to_string())
+}
+
+fn admin(actor: &Actor) -> std::result::Result<(), (u16, String)> {
     match actor {
-        Actor::Admin => Ok(()),
+        Actor::Admin(_) => Ok(()),
         Actor::Token(_) => Err((403, "este token no administra".to_string())),
     }
 }
 
-fn scoped(actor: &Actor, project: &str, env: &str) -> Result<(), (u16, String)> {
+fn scoped(actor: &Actor, project: &str, env: &str) -> std::result::Result<(), (u16, String)> {
     match actor {
-        Actor::Admin => Ok(()),
+        Actor::Admin(_) => Ok(()),
         Actor::Token(token) if token.project == project && token.env == env => Ok(()),
         Actor::Token(_) => Err((403, "este token no llega a ese entorno".to_string())),
     }
@@ -132,7 +191,10 @@ fn visible(actor: &Actor, map: BTreeMap<String, String>) -> BTreeMap<String, Str
         .collect()
 }
 
-fn scoped_request(request: &Request, actor: &Actor) -> Result<(String, String), (u16, String)> {
+fn scoped_request(
+    request: &Request,
+    actor: &Actor,
+) -> std::result::Result<(String, String), (u16, String)> {
     let project = request.param("project").unwrap_or_default().to_string();
     let env = request.param("env").unwrap_or_default().to_string();
     if project.is_empty() || env.is_empty() {
@@ -144,24 +206,24 @@ fn scoped_request(request: &Request, actor: &Actor) -> Result<(String, String), 
 
 fn read_secrets(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let (project, env) = scoped_request(request, actor)?;
-    let map = store.secrets(&project, &env).map_err(bad_request)?;
-    let filtered = visible(actor, map);
     if let Actor::Token(token) = actor {
-        if let Some(keys) = &token.keys {
-            if let Some(wanted) = request.param("key") {
-                if !keys.contains(&wanted.to_string()) {
-                    return Err((403, format!("este token no ve {wanted}")));
-                }
+        if let (Some(keys), Some(wanted)) = (&token.keys, request.param("key")) {
+            if !keys.contains(&wanted.to_string()) {
+                return Err((403, format!("este token no ve {wanted}")));
             }
         }
     }
+    let map = reply(store.secrets(&project, &env))?;
+    let filtered = visible(actor, map);
+    reply(store.audit(actor.label(), "get-secrets", &project, &env, None))?;
     Ok(json!(filtered))
 }
 
 fn read_keys(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let (project, env) = scoped_request(request, actor)?;
-    let map = store.secrets(&project, &env).map_err(bad_request)?;
+    let map = reply(store.secrets(&project, &env))?;
     let names: Vec<String> = visible(actor, map).into_keys().collect();
+    reply(store.audit(actor.label(), "get-keys", &project, &env, None))?;
     Ok(json!(names))
 }
 
@@ -171,9 +233,7 @@ fn write_secret(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let env = request.field("env").unwrap_or_default();
     let name = request.field("key").unwrap_or_default();
     let value = request.field("value").unwrap_or_default();
-    store
-        .set(&project, &env, &name, &value, actor.label())
-        .map_err(bad_request)?;
+    reply(store.set(&project, &env, &name, &value, actor.label()))?;
     Ok(json!({ "ok": true }))
 }
 
@@ -182,27 +242,29 @@ fn delete_secret(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let project = request.field("project").unwrap_or_default();
     let env = request.field("env").unwrap_or_default();
     let name = request.field("key").unwrap_or_default();
-    store
-        .unset(&project, &env, &name, actor.label())
-        .map_err(bad_request)?;
+    reply(store.unset(&project, &env, &name, actor.label()))?;
     Ok(json!({ "ok": true }))
 }
 
 fn create_token(store: &Store, actor: &Actor, request: &Request) -> Reply {
     admin(actor)?;
-    let name = request.field("name").unwrap_or_default();
-    let project = request.field("project").unwrap_or_default();
-    let env = request.field("env").unwrap_or_default();
-    let keys = request.list("keys");
-    let (token, plain) = store
-        .create_token(&name, &project, &env, keys, actor.label())
-        .map_err(bad_request)?;
+    let new = NewToken {
+        name: request.field("name").unwrap_or_default(),
+        project: request.field("project").unwrap_or_default(),
+        env: request.field("env").unwrap_or_default(),
+        keys: request.list("keys"),
+        admin: request.flag("admin"),
+        ttl: request.number("ttl"),
+    };
+    let (token, plain) = reply(store.create_token(new, actor.label()))?;
     Ok(json!({
         "id": token.id,
         "name": token.name,
         "project": token.project,
         "env": token.env,
         "keys": token.keys,
+        "admin": token.admin,
+        "expires_at": token.expires_at,
         "token": plain,
     }))
 }
@@ -213,12 +275,8 @@ fn revoke_token(store: &Store, actor: &Actor, request: &Request) -> Reply {
         .field("id")
         .or_else(|| request.param("id").map(str::to_string))
         .unwrap_or_default();
-    let token = store.revoke(&id, actor.label()).map_err(bad_request)?;
+    let token = reply(store.revoke(&id, actor.label()))?;
     Ok(json!({ "id": token.id, "name": token.name }))
-}
-
-fn bad_request(message: String) -> (u16, String) {
-    (400, message)
 }
 
 #[cfg(test)]
@@ -226,6 +284,7 @@ mod tests {
     use super::*;
     use crate::crypto::Key;
     use crate::store::temp_root;
+    use std::collections::HashMap;
 
     fn server() -> Arc<Server> {
         let store = Store::open(temp_root(), Key::from_hex(&"ab".repeat(32)).unwrap()).unwrap();
@@ -235,72 +294,60 @@ mod tests {
         })
     }
 
-    fn get(path: &str, token: &str) -> Request {
+    fn request(method: &str, path: &str, token: &str, body: Value) -> Request {
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
         Request {
-            method: "GET".into(),
+            method: method.to_string(),
             path: path.to_string(),
             query: http::parse_pairs(query),
-            headers: std::collections::HashMap::from([(
-                "authorization".to_string(),
-                format!("Bearer {token}"),
-            )]),
-            body: Vec::new(),
+            headers: HashMap::from([("authorization".to_string(), format!("Bearer {token}"))]),
+            body: serde_json::to_vec(&body).unwrap_or_default(),
             too_large: false,
         }
     }
 
-    fn put(body: Value, token: &str) -> Request {
-        Request {
-            method: "PUT".into(),
-            path: "/v1/secrets".into(),
-            query: Default::default(),
-            headers: std::collections::HashMap::from([(
-                "authorization".to_string(),
-                format!("Bearer {token}"),
-            )]),
-            body: serde_json::to_vec(&body).unwrap(),
-            too_large: false,
-        }
+    fn agent(store: &Store, keys: Option<Vec<String>>, ttl: Option<i64>) -> String {
+        let new = NewToken {
+            name: "agente".to_string(),
+            project: "bifrost".to_string(),
+            env: "dev".to_string(),
+            keys,
+            admin: false,
+            ttl,
+        };
+        store.create_token(new, "berti").unwrap().1
     }
 
     #[test]
     fn a_request_without_a_token_is_rejected() {
         let server = server();
-        let request = Request {
-            method: "GET".into(),
-            path: "/v1/secrets".into(),
-            query: Default::default(),
-            headers: Default::default(),
-            body: Vec::new(),
-            too_large: false,
-        };
         let store = server.store.lock().unwrap();
-        assert_eq!(route(&server, &store, &request).unwrap_err().0, 401);
+        let mut bare = request("GET", "/v1/secrets", "", json!({}));
+        bare.headers.clear();
+        assert_eq!(route(&server, &store, &bare).unwrap_err().0, 401);
     }
 
     #[test]
     fn the_admin_writes_and_a_token_reads() {
         let server = server();
         let store = server.store.lock().unwrap();
-        let write = route(
+        let write = json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" });
+        route(
             &server,
             &store,
-            &put(
-                json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" }),
-                "hd_admin",
-            ),
+            &request("PUT", "/v1/secrets", "hd_admin", write),
         )
         .unwrap();
-        assert_eq!(write["ok"], true);
-        let (token, plain) = store
-            .create_token("agente", "bifrost", "dev", None, "admin")
-            .unwrap();
-        assert_eq!(token.project, "bifrost");
+        let plain = agent(&store, None, None);
         let read = route(
             &server,
             &store,
-            &get("/v1/secrets?project=bifrost&env=dev", &plain),
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=dev",
+                &plain,
+                json!({}),
+            ),
         )
         .unwrap();
         assert_eq!(read["A"], "1");
@@ -310,14 +357,17 @@ mod tests {
     fn a_token_does_not_reach_another_environment() {
         let server = server();
         let store = server.store.lock().unwrap();
-        store.set("bifrost", "prod", "A", "1", "admin").unwrap();
-        let (_, plain) = store
-            .create_token("agente", "bifrost", "dev", None, "admin")
-            .unwrap();
+        store.set("bifrost", "prod", "A", "1", "berti").unwrap();
+        let plain = agent(&store, None, None);
         let error = route(
             &server,
             &store,
-            &get("/v1/secrets?project=bifrost&env=prod", &plain),
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=prod",
+                &plain,
+                json!({}),
+            ),
         )
         .unwrap_err();
         assert_eq!(error.0, 403);
@@ -327,16 +377,18 @@ mod tests {
     fn a_token_with_keys_only_sees_those() {
         let server = server();
         let store = server.store.lock().unwrap();
-        store.set("bifrost", "dev", "A", "1", "admin").unwrap();
-        store.set("bifrost", "dev", "B", "2", "admin").unwrap();
-        let keys = Some(vec!["A".to_string()]);
-        let (_, plain) = store
-            .create_token("agente", "bifrost", "dev", keys, "admin")
-            .unwrap();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("bifrost", "dev", "B", "2", "berti").unwrap();
+        let plain = agent(&store, Some(vec!["A".to_string()]), None);
         let read = route(
             &server,
             &store,
-            &get("/v1/secrets?project=bifrost&env=dev", &plain),
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=dev",
+                &plain,
+                json!({}),
+            ),
         )
         .unwrap();
         assert_eq!(read["A"], "1");
@@ -344,30 +396,143 @@ mod tests {
         let keys = route(
             &server,
             &store,
-            &get("/v1/keys?project=bifrost&env=dev", &plain),
+            &request("GET", "/v1/keys?project=bifrost&env=dev", &plain, json!({})),
         )
         .unwrap();
         assert_eq!(keys.as_array().unwrap().len(), 1);
+        let denied = route(
+            &server,
+            &store,
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=dev&key=B",
+                &plain,
+                json!({}),
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(denied.0, 403);
     }
 
     #[test]
     fn a_token_cannot_write_or_administrate() {
         let server = server();
         let store = server.store.lock().unwrap();
-        let (_, plain) = store
-            .create_token("agente", "bifrost", "dev", None, "admin")
-            .unwrap();
-        let write = route(
+        let plain = agent(&store, None, None);
+        let write = json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" });
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("PUT", "/v1/secrets", &plain, write)
+            )
+            .unwrap_err()
+            .0,
+            403
+        );
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("GET", "/v1/tokens", &plain, json!({}))
+            )
+            .unwrap_err()
+            .0,
+            403
+        );
+    }
+
+    #[test]
+    fn an_admin_token_administrates() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        let new = NewToken {
+            name: "jimmy".to_string(),
+            project: String::new(),
+            env: String::new(),
+            keys: None,
+            admin: true,
+            ttl: None,
+        };
+        let (_, plain) = store.create_token(new, "berti").unwrap();
+        let write = json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" });
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("PUT", "/v1/secrets", &plain, write)
+            )
+            .unwrap()["ok"],
+            true
+        );
+        let read = route(
             &server,
             &store,
-            &put(
-                json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" }),
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=dev",
                 &plain,
+                json!({}),
             ),
         )
-        .unwrap_err();
-        assert_eq!(write.0, 403);
-        let tokens = route(&server, &store, &get("/v1/tokens", &plain)).unwrap_err();
-        assert_eq!(tokens.0, 403);
+        .unwrap();
+        assert_eq!(read["A"], "1");
+    }
+
+    #[test]
+    fn an_expired_token_is_a_401() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        let plain = agent(&store, None, Some(-1));
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request(
+                    "GET",
+                    "/v1/secrets?project=bifrost&env=dev",
+                    &plain,
+                    json!({})
+                )
+            )
+            .unwrap_err()
+            .0,
+            401
+        );
+    }
+
+    #[test]
+    fn every_read_leaves_a_trail() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        let plain = agent(&store, None, None);
+        route(
+            &server,
+            &store,
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=dev",
+                &plain,
+                json!({}),
+            ),
+        )
+        .unwrap();
+        route(
+            &server,
+            &store,
+            &request("GET", "/v1/keys?project=bifrost&env=dev", &plain, json!({})),
+        )
+        .unwrap();
+        let log = store.audit_log(10).unwrap();
+        let reads: Vec<&str> = log
+            .iter()
+            .map(|entry| entry["action"].as_str().unwrap())
+            .filter(|action| action.starts_with("get-"))
+            .collect();
+        assert_eq!(reads, vec!["get-keys", "get-secrets"]);
+        assert!(log
+            .iter()
+            .all(|entry| entry["actor"] == "agente" || entry["actor"] == "berti"));
     }
 }

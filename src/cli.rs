@@ -28,7 +28,8 @@ heimdall — secretos por proyecto y entorno
   heimdall unset CLAVE --project X --env Y
   heimdall ls --project X --env Y
   heimdall environments
-  heimdall token create --name N --project X --env Y [--keys A,B]
+  heimdall token create --name N --project X --env Y [--keys A,B] [--ttl 2h]
+  heimdall token create --name N --admin [--ttl 24h]
   heimdall token list
   heimdall token revoke --id ID
   heimdall audit
@@ -136,16 +137,22 @@ fn token(args: &[String]) -> Result<(), String> {
 
 fn token_create(args: &[String]) -> Result<(), String> {
     let name = required(args, "--name")?;
-    let project = required(args, "--project")?;
-    let env = required(args, "--env")?;
-    let mut body = json!({ "name": name, "project": project, "env": env });
-    if let Some(keys) = flag(args, "--keys") {
-        let list: Vec<&str> = keys
-            .split(',')
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .collect();
-        body["keys"] = json!(list);
+    let admin = args.iter().any(|arg| arg == "--admin");
+    let mut body = json!({ "name": name, "admin": admin });
+    if !admin {
+        body["project"] = json!(required(args, "--project")?);
+        body["env"] = json!(required(args, "--env")?);
+        if let Some(keys) = flag(args, "--keys") {
+            let list: Vec<&str> = keys
+                .split(',')
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .collect();
+            body["keys"] = json!(list);
+        }
+    }
+    if let Some(ttl) = flag(args, "--ttl") {
+        body["ttl"] = json!(parse_ttl(&ttl)?);
     }
     let value = call("POST", "/v1/tokens", Some(body))?;
     println!("{}", value["token"].as_str().unwrap_or(""));
@@ -154,6 +161,24 @@ fn token_create(args: &[String]) -> Result<(), String> {
         value["id"].as_str().unwrap_or("")
     );
     Ok(())
+}
+
+fn parse_ttl(text: &str) -> Result<i64, String> {
+    if text.len() < 2 {
+        return Err(format!("«{text}»: usá un número y s, m, h o d"));
+    }
+    let (number, unit) = text.split_at(text.len() - 1);
+    let value: i64 = number
+        .parse()
+        .map_err(|_| format!("«{text}» no tiene un número adelante"))?;
+    let seconds = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(format!("«{text}»: usá s, m, h o d")),
+    };
+    Ok(value * seconds)
 }
 
 fn token_revoke(args: &[String]) -> Result<(), String> {
@@ -166,30 +191,48 @@ fn token_revoke(args: &[String]) -> Result<(), String> {
 fn token_list() -> Result<(), String> {
     let value = call("GET", "/v1/tokens", None)?;
     for entry in value.as_array().into_iter().flatten() {
-        let keys = entry["keys"].as_array().map(|keys| {
-            keys.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
         println!(
-            "{}  {}  {}/{}  {}{}",
+            "{}  {}",
             entry["id"].as_str().unwrap_or(""),
-            entry["name"].as_str().unwrap_or(""),
-            entry["project"].as_str().unwrap_or(""),
-            entry["env"].as_str().unwrap_or(""),
-            match keys {
-                Some(keys) if !keys.is_empty() => format!("claves: {keys}"),
-                Some(_) => "sin claves: ve todo el entorno".to_string(),
-                None => "ve todo el entorno".to_string(),
-            },
-            match entry["last_used"].as_u64() {
-                Some(used) => format!("  último uso {used}"),
-                None => "  sin uso".to_string(),
-            }
+            describe(entry)
         );
     }
     Ok(())
+}
+
+fn describe(entry: &Value) -> String {
+    let name = entry["name"].as_str().unwrap_or("");
+    let scope = if entry["admin"].as_bool().unwrap_or(false) {
+        "admin".to_string()
+    } else {
+        format!(
+            "{}/{}",
+            entry["project"].as_str().unwrap_or(""),
+            entry["env"].as_str().unwrap_or("")
+        )
+    };
+    let keys = entry["keys"].as_array().map(|keys| {
+        keys.iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+    let mut out = format!(
+        "{name}  {scope}  {}",
+        match keys {
+            Some(keys) if !keys.is_empty() => format!("claves: {keys}"),
+            Some(_) => "sin claves: ve todo el entorno".to_string(),
+            None => "ve todo el entorno".to_string(),
+        }
+    );
+    if let Some(expires) = entry["expires_at"].as_i64() {
+        out.push_str(&format!("  vence {expires}"));
+    }
+    out.push_str(&match entry["last_used"].as_i64() {
+        Some(used) => format!("  último uso {used}"),
+        None => "  sin uso".to_string(),
+    });
+    out
 }
 
 fn audit() -> Result<(), String> {
@@ -277,5 +320,21 @@ mod tests {
     #[test]
     fn a_missing_flag_is_an_error() {
         assert!(required(&args("ls"), "--project").is_err());
+    }
+
+    #[test]
+    fn ttl_units_become_seconds() {
+        assert_eq!(parse_ttl("30s").unwrap(), 30);
+        assert_eq!(parse_ttl("15m").unwrap(), 900);
+        assert_eq!(parse_ttl("2h").unwrap(), 7200);
+        assert_eq!(parse_ttl("7d").unwrap(), 604800);
+    }
+
+    #[test]
+    fn a_bad_ttl_is_an_error() {
+        assert!(parse_ttl("2").is_err());
+        assert!(parse_ttl("h").is_err());
+        assert!(parse_ttl("2w").is_err());
+        assert!(parse_ttl("dos-h").is_err());
     }
 }
