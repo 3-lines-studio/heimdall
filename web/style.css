@@ -149,6 +149,16 @@ td.acciones {
   justify-content: flex-end;
 }
 
+#primer:not([hidden]) {
+  display: grid;
+  gap: 4px;
+  max-width: 640px;
+}
+
+#primer p {
+  margin: 0 0 4px;
+}
+
 .linea {
   display: flex;
   flex-wrap: wrap;
