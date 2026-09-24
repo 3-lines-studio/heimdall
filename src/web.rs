@@ -12,6 +12,8 @@ const AUTH_JS: &str = include_str!("../web/auth.js");
 const APP: &str = include_str!("../web/app.js");
 const UTIL: &str = include_str!("../web/util.js");
 const STYLE: &str = include_str!("../web/style.css");
+const THEME: &str = include_str!("../web/theme.css");
+const THEME_JS: &str = include_str!("../web/theme.js");
 const ICON: &str = include_str!("../web/icon.svg");
 
 const HTML: &str = "text/html; charset=utf-8";
@@ -36,6 +38,8 @@ pub fn handle(
         ("GET", "/app.js") => asset(stream, JS, APP.as_bytes()),
         ("GET", "/util.js") => asset(stream, JS, UTIL.as_bytes()),
         ("GET", "/style.css") => asset(stream, CSS, STYLE.as_bytes()),
+        ("GET", "/theme.css") => asset(stream, CSS, THEME.as_bytes()),
+        ("GET", "/theme.js") => asset(stream, JS, THEME_JS.as_bytes()),
         ("GET", "/icon.svg") => asset(stream, "image/svg+xml", ICON.as_bytes()),
         ("POST", "/api/login") => ask_for_link(server, request, stream),
         ("POST", "/api/enter") => enter(server, request, stream),
@@ -162,6 +166,8 @@ fn asset(stream: &mut TcpStream, content_type: &str, body: &[u8]) -> std::io::Re
 fn versioned(page: &str) -> String {
     let version = std::env::var("RAILWAY_GIT_COMMIT_SHA").unwrap_or_default();
     page.replace("/app.js", &format!("/app.js?v={version}"))
+        .replace("/theme.css", &format!("/theme.css?v={version}"))
+        .replace("/theme.js", &format!("/theme.js?v={version}"))
         .replace("/util.js", &format!("/util.js?v={version}"))
         .replace("/login.js", &format!("/login.js?v={version}"))
         .replace("/auth.js", &format!("/auth.js?v={version}"))
@@ -177,10 +183,12 @@ mod tests {
     fn versioned_assets_point_at_the_commit() {
         std::env::set_var("RAILWAY_GIT_COMMIT_SHA", "abc123");
         let page = versioned(
-            r#"<script src="/app.js"></script><script src="/util.js"></script><link href="/style.css">"#,
+            r#"<script src="/app.js"></script><script src="/util.js"></script><script src="/theme.js"></script><link href="/style.css"><link href="/theme.css">"#,
         );
         assert!(page.contains("/app.js?v=abc123"));
         assert!(page.contains("/util.js?v=abc123"));
+        assert!(page.contains("/theme.js?v=abc123"));
+        assert!(page.contains("/theme.css?v=abc123"));
         assert!(page.contains("/style.css?v=abc123"));
     }
 }

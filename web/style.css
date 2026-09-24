@@ -1,28 +1,3 @@
-:root {
-  --fondo: #fbfbfa;
-  --texto: #1c1c1a;
-  --tenue: #6b6b66;
-  --borde: #e2e2dd;
-  --panel: #ffffff;
-  --acento: #2f6feb;
-  --peligro: #b3261e;
-  --suave: #f1f1ed;
-  --radio: 8px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fondo: #16171a;
-    --texto: #e8e8e6;
-    --tenue: #9a9a95;
-    --borde: #2e3034;
-    --panel: #1d1e22;
-    --acento: #6f9cff;
-    --peligro: #ff6b60;
-    --suave: #26282d;
-  }
-}
-
 * {
   box-sizing: border-box;
 }
@@ -464,7 +439,7 @@ td.acciones {
 }
 
 .renglon .estructura::before {
-  background: #17a673;
+  background: var(--ok);
 }
 
 .renglon .objeto {
@@ -495,6 +470,11 @@ td.acciones {
   place-items: center;
   min-height: 100vh;
   padding: 16px;
+}
+
+.suelto {
+  justify-self: end;
+  margin-bottom: -10px;
 }
 
 .tarjeta {
