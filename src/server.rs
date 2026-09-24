@@ -109,6 +109,11 @@ fn route(server: &Arc<Server>, store: &Store, request: &Request) -> Reply {
         ("GET", "/v1/keys") => read_keys(store, &actor, request),
         ("PUT", "/v1/secrets") => write_secret(store, &actor, request),
         ("DELETE", "/v1/secrets") => delete_secret(store, &actor, request),
+        ("POST", "/v1/environments") => create_environment(store, &actor, request),
+        ("DELETE", "/v1/environments") => drop_environment(store, &actor, request),
+        ("DELETE", "/v1/projects") => drop_project(store, &actor, request),
+        ("POST", "/v1/rename-environment") => rename_environment(store, &actor, request),
+        ("POST", "/v1/rename-project") => rename_project(store, &actor, request),
         ("GET", "/v1/environments") => {
             admin(&actor)?;
             let names = reply(store.names())?;
@@ -261,6 +266,46 @@ fn delete_secret(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let name = request.field("key").unwrap_or_default();
     reply(store.unset(&project, &env, &name, actor.label()))?;
     Ok(json!({ "ok": true }))
+}
+
+fn create_environment(store: &Store, actor: &Actor, request: &Request) -> Reply {
+    admin(actor)?;
+    let project = request.field("project").unwrap_or_default();
+    let env = request.field("env").unwrap_or_default();
+    reply(store.create_environment(&project, &env, actor.label()))?;
+    Ok(json!({ "ok": true }))
+}
+
+fn drop_environment(store: &Store, actor: &Actor, request: &Request) -> Reply {
+    admin(actor)?;
+    let project = request.field("project").unwrap_or_default();
+    let env = request.field("env").unwrap_or_default();
+    reply(store.drop_environment(&project, &env, actor.label()))?;
+    Ok(json!({ "ok": true }))
+}
+
+fn drop_project(store: &Store, actor: &Actor, request: &Request) -> Reply {
+    admin(actor)?;
+    let project = request.field("project").unwrap_or_default();
+    reply(store.drop_project(&project, actor.label()))?;
+    Ok(json!({ "ok": true }))
+}
+
+fn rename_environment(store: &Store, actor: &Actor, request: &Request) -> Reply {
+    admin(actor)?;
+    let project = request.field("project").unwrap_or_default();
+    let env = request.field("env").unwrap_or_default();
+    let to = request.field("to").unwrap_or_default();
+    reply(store.rename_environment(&project, &env, &to, actor.label()))?;
+    Ok(json!({ "ok": true, "env": to }))
+}
+
+fn rename_project(store: &Store, actor: &Actor, request: &Request) -> Reply {
+    admin(actor)?;
+    let project = request.field("project").unwrap_or_default();
+    let to = request.field("to").unwrap_or_default();
+    reply(store.rename_project(&project, &to, actor.label()))?;
+    Ok(json!({ "ok": true, "project": to }))
 }
 
 fn create_token(store: &Store, actor: &Actor, request: &Request) -> Reply {
@@ -519,6 +564,141 @@ mod tests {
             .unwrap_err()
             .0,
             401
+        );
+    }
+
+    #[test]
+    fn the_structure_is_created_and_dropped_from_the_api() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        let body = json!({ "project": "bifrost", "env": "dev" });
+        route(
+            &server,
+            &store,
+            &request("POST", "/v1/environments", "hd_admin", body.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("GET", "/v1/environments", "hd_admin", json!({}))
+            )
+            .unwrap(),
+            json!(["bifrost/dev"])
+        );
+
+        route(
+            &server,
+            &store,
+            &request(
+                "PUT",
+                "/v1/secrets",
+                "hd_admin",
+                json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" }),
+            ),
+        )
+        .unwrap();
+        route(
+            &server,
+            &store,
+            &request("DELETE", "/v1/environments", "hd_admin", body),
+        )
+        .unwrap();
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("GET", "/v1/environments", "hd_admin", json!({}))
+            )
+            .unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request(
+                    "GET",
+                    "/v1/secrets?project=bifrost&env=dev",
+                    "hd_admin",
+                    json!({})
+                )
+            )
+            .unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn renaming_from_the_api_keeps_the_values() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        route(
+            &server,
+            &store,
+            &request(
+                "PUT",
+                "/v1/secrets",
+                "hd_admin",
+                json!({ "project": "bifrost", "env": "dev", "key": "A", "value": "1" }),
+            ),
+        )
+        .unwrap();
+        let renamed = json!({ "project": "bifrost", "env": "dev", "to": "testing" });
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("POST", "/v1/rename-environment", "hd_admin", renamed)
+            )
+            .unwrap()["env"],
+            "testing"
+        );
+        let read = route(
+            &server,
+            &store,
+            &request(
+                "GET",
+                "/v1/secrets?project=bifrost&env=testing",
+                "hd_admin",
+                json!({}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(read["A"], "1");
+    }
+
+    #[test]
+    fn only_an_admin_touches_the_structure() {
+        let server = server();
+        let store = server.store.lock().unwrap();
+        let plain = agent(&store, None, None);
+        let body = json!({ "project": "bifrost", "env": "dev" });
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request("POST", "/v1/environments", &plain, body)
+            )
+            .unwrap_err()
+            .0,
+            403
+        );
+        assert_eq!(
+            route(
+                &server,
+                &store,
+                &request(
+                    "DELETE",
+                    "/v1/projects",
+                    &plain,
+                    json!({ "project": "bifrost" })
+                )
+            )
+            .unwrap_err()
+            .0,
+            403
         );
     }
 

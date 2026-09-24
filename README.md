@@ -17,7 +17,14 @@ Nobody gets into the service. The only way to a secret is the API, with a token.
 - Tokens are stored hashed, with their scope. A token for `bifrost/dev` cannot
   read `bifrost/prod`: no request returns it, and asking for it is a 403.
 - Every value carries its own name inside its sealed box, so swapping two rows
-  in the database is a decryption error and not a swapped secret.
+  in the database is a decryption error and not a swapped secret. Renaming an
+  environment or a project re-seals what it held, since the name is part of the
+  box.
+- An environment is a row of its own, so it exists before its first secret. The
+  listing is that table plus whatever the secrets table already had: nothing to
+  migrate.
+- Dropping an environment takes its secrets and the tokens that pointed at it.
+  Renaming one re-seals what it held, since the name is part of the box.
 - The audit log records who read what, who wrote it and who asked for a token.
   Never a value.
 
@@ -93,6 +100,11 @@ heimdall run --project bifrost --env dev -- npm test
 | `PUT /v1/secrets` | admin | `{project,env,key,value}` |
 | `DELETE /v1/secrets` | admin | `{project,env,key}` |
 | `GET /v1/environments` | admin | every `project/env` that exists |
+| `POST /v1/environments` | admin | `{project,env}`, declared before it has a secret |
+| `DELETE /v1/environments` | admin | `{project,env}`, with its secrets and tokens |
+| `DELETE /v1/projects` | admin | `{project}`, with everything under it |
+| `POST /v1/rename-environment` | admin | `{project,env,to}`, re-sealing what it held |
+| `POST /v1/rename-project` | admin | `{project,to}`, re-sealing everything under it |
 | `GET /v1/tokens` | admin | the tokens, without their secrets |
 | `POST /v1/tokens` | admin | `{name,project,env,keys?,admin?,ttl?}`, returns the token once |
 | `DELETE /v1/tokens?id=` | admin | revoke |

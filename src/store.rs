@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS audit (
     env TEXT NOT NULL,
     name TEXT
 );
+CREATE TABLE IF NOT EXISTS environments (
+    project TEXT NOT NULL,
+    env TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project, env)
+);
 CREATE TABLE IF NOT EXISTS logins (
     hash TEXT PRIMARY KEY,
     email TEXT NOT NULL,
@@ -111,12 +117,166 @@ impl Store {
         Ok(Store { db, key })
     }
 
+    /// Lo que se declaró más lo que ya tiene secretos: los entornos que existían
+    /// antes de que hubiera una tabla siguen apareciendo sin migrar nada.
     pub fn names(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT DISTINCT project || '/' || env FROM secrets ORDER BY 1")?;
+        let mut statement = self.db.prepare(
+            "SELECT project || '/' || env FROM environments
+             UNION
+             SELECT DISTINCT project || '/' || env FROM secrets
+             ORDER BY 1",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    pub fn create_environment(&self, project: &str, env: &str, actor: &str) -> Result<()> {
+        slug(project)?;
+        slug(env)?;
+        self.db.execute(
+            "INSERT OR IGNORE INTO environments (project, env, created_at) VALUES (?1, ?2, ?3)",
+            params![project, env, now()],
+        )?;
+        self.audit(actor, "env-create", project, env, None)
+    }
+
+    /// Los tokens que apuntaban al entorno se van con él: no tienen sentido
+    /// sobre algo que dejó de existir.
+    pub fn drop_environment(&self, project: &str, env: &str, actor: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let secrets = self.db.execute(
+            "DELETE FROM secrets WHERE project = ?1 AND env = ?2",
+            params![project, env],
+        )?;
+        let declared = self.db.execute(
+            "DELETE FROM environments WHERE project = ?1 AND env = ?2",
+            params![project, env],
+        )?;
+        let tokens = self.db.execute(
+            "DELETE FROM tokens WHERE project = ?1 AND env = ?2",
+            params![project, env],
+        )?;
+        if secrets == 0 && declared == 0 && tokens == 0 {
+            return bad(format!("{project}/{env} no existe"));
+        }
+        self.audit(actor, "env-drop", project, env, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn drop_project(&self, project: &str, actor: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let secrets = self
+            .db
+            .execute("DELETE FROM secrets WHERE project = ?1", params![project])?;
+        let declared = self.db.execute(
+            "DELETE FROM environments WHERE project = ?1",
+            params![project],
+        )?;
+        let tokens = self
+            .db
+            .execute("DELETE FROM tokens WHERE project = ?1", params![project])?;
+        if secrets == 0 && declared == 0 && tokens == 0 {
+            return bad(format!("{project} no existe"));
+        }
+        self.audit(actor, "project-drop", project, "", None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Renombrar mueve la clave derivada y el dato asociado, así que hay que
+    /// volver a sellar cada valor: el sobre viejo no abre en el nombre nuevo.
+    pub fn rename_environment(
+        &self,
+        project: &str,
+        env: &str,
+        to: &str,
+        actor: &str,
+    ) -> Result<()> {
+        slug(to)?;
+        if env == to {
+            return Ok(());
+        }
+        let moved = self.secrets(project, env)?;
+        if !self.secrets(project, to)?.is_empty() {
+            return bad(format!("{project}/{to} ya tiene secretos"));
+        }
+        let tx = self.db.unchecked_transaction()?;
+        for (name, value) in &moved {
+            let sealed = self
+                .key
+                .derive(&context(project, to))
+                .seal(value.as_bytes(), aad(project, to, name).as_bytes())
+                .map_err(Error::Internal)?;
+            self.db.execute(
+                "INSERT INTO secrets (project, env, name, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![project, to, name, sealed, now()],
+            )?;
+        }
+        self.db.execute(
+            "DELETE FROM secrets WHERE project = ?1 AND env = ?2",
+            params![project, env],
+        )?;
+        self.db.execute(
+            "DELETE FROM environments WHERE project = ?1 AND env = ?2",
+            params![project, to],
+        )?;
+        self.db.execute(
+            "UPDATE environments SET env = ?1 WHERE project = ?2 AND env = ?3",
+            params![to, project, env],
+        )?;
+        self.audit(actor, "env-rename", project, to, Some(env))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn rename_project(&self, project: &str, to: &str, actor: &str) -> Result<()> {
+        slug(to)?;
+        if project == to {
+            return Ok(());
+        }
+        if self
+            .names()?
+            .iter()
+            .any(|name| name.starts_with(&format!("{to}/")))
+        {
+            return bad(format!("{to} ya existe"));
+        }
+        let mut statement = self.db.prepare(
+            "SELECT env FROM environments WHERE project = ?1
+             UNION
+             SELECT DISTINCT env FROM secrets WHERE project = ?1",
+        )?;
+        let envs: Vec<String> = statement
+            .query_map(params![project], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(statement);
+        if envs.is_empty() {
+            return bad(format!("{project} no existe"));
+        }
+        let tx = self.db.unchecked_transaction()?;
+        for env in &envs {
+            for (name, value) in &self.secrets(project, env)? {
+                let sealed = self
+                    .key
+                    .derive(&context(to, env))
+                    .seal(value.as_bytes(), aad(to, env, name).as_bytes())
+                    .map_err(Error::Internal)?;
+                self.db.execute(
+                    "INSERT INTO secrets (project, env, name, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![to, env, name, sealed, now()],
+                )?;
+            }
+        }
+        self.db
+            .execute("DELETE FROM secrets WHERE project = ?1", params![project])?;
+        self.db.execute(
+            "UPDATE environments SET project = ?1 WHERE project = ?2",
+            params![to, project],
+        )?;
+        self.audit(actor, "project-rename", to, "", Some(project))?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn secrets(&self, project: &str, env: &str) -> Result<BTreeMap<String, String>> {
@@ -666,6 +826,157 @@ mod tests {
             store.names().unwrap(),
             vec!["axe/dev", "bifrost/dev", "bifrost/prod"]
         );
+    }
+
+    #[test]
+    fn an_environment_can_exist_before_its_first_secret() {
+        let store = store();
+        store.create_environment("bifrost", "dev", "berti").unwrap();
+        assert_eq!(store.names().unwrap(), vec!["bifrost/dev"]);
+        assert!(store.secrets("bifrost", "dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_listing_also_shows_what_was_there_before_the_table() {
+        let store = store();
+        store.set("axe", "dev", "A", "1", "berti").unwrap();
+        store.create_environment("bifrost", "dev", "berti").unwrap();
+        assert_eq!(store.names().unwrap(), vec!["axe/dev", "bifrost/dev"]);
+    }
+
+    #[test]
+    fn dropping_an_environment_takes_its_secrets() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("bifrost", "prod", "A", "2", "berti").unwrap();
+        store.drop_environment("bifrost", "dev", "berti").unwrap();
+        assert_eq!(store.names().unwrap(), vec!["bifrost/prod"]);
+        assert!(store.secrets("bifrost", "dev").unwrap().is_empty());
+        assert_eq!(store.secrets("bifrost", "prod").unwrap()["A"], "2");
+    }
+
+    #[test]
+    fn dropping_an_empty_environment_works_too() {
+        let store = store();
+        store.create_environment("bifrost", "dev", "berti").unwrap();
+        store.drop_environment("bifrost", "dev", "berti").unwrap();
+        assert!(store.names().unwrap().is_empty());
+        assert!(store.drop_environment("bifrost", "dev", "berti").is_err());
+    }
+
+    #[test]
+    fn dropping_a_project_takes_everything() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("bifrost", "prod", "A", "2", "berti").unwrap();
+        store.set("axe", "dev", "A", "3", "berti").unwrap();
+        store.drop_project("bifrost", "berti").unwrap();
+        assert_eq!(store.names().unwrap(), vec!["axe/dev"]);
+        assert!(store.drop_project("bifrost", "berti").is_err());
+    }
+
+    #[test]
+    fn dropping_an_environment_takes_its_tokens() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        let nuevos = NewToken {
+            name: "agente".to_string(),
+            project: "bifrost".to_string(),
+            env: "dev".to_string(),
+            keys: None,
+            admin: false,
+            ttl: None,
+        };
+        let (_, plain) = store.create_token(nuevos, "berti").unwrap();
+        store.drop_environment("bifrost", "dev", "berti").unwrap();
+        assert!(store.find(&plain).unwrap().is_none());
+        assert!(store.tokens().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_a_project_leaves_the_admin_tokens_alone() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        let nuevos = NewToken {
+            name: "agente".to_string(),
+            project: "bifrost".to_string(),
+            env: "dev".to_string(),
+            keys: None,
+            admin: false,
+            ttl: None,
+        };
+        let (_, agente) = store.create_token(nuevos, "berti").unwrap();
+        let admin = NewToken {
+            name: "jimmy".to_string(),
+            project: String::new(),
+            env: String::new(),
+            keys: None,
+            admin: true,
+            ttl: None,
+        };
+        let (_, plain) = store.create_token(admin, "berti").unwrap();
+        store.drop_project("bifrost", "berti").unwrap();
+        assert!(store.find(&plain).unwrap().is_some());
+        assert!(store.find(&agente).unwrap().is_none());
+    }
+
+    #[test]
+    fn renaming_an_environment_keeps_its_values_working() {
+        let store = store();
+        store
+            .set("bifrost", "dev", "STRIPE_KEY", "sk_test_123", "berti")
+            .unwrap();
+        store
+            .rename_environment("bifrost", "dev", "testing", "berti")
+            .unwrap();
+        assert_eq!(store.names().unwrap(), vec!["bifrost/testing"]);
+        assert_eq!(
+            store.secrets("bifrost", "testing").unwrap()["STRIPE_KEY"],
+            "sk_test_123"
+        );
+        assert!(store.secrets("bifrost", "dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn renaming_an_environment_into_a_taken_one_is_refused() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("bifrost", "prod", "A", "2", "berti").unwrap();
+        assert!(store
+            .rename_environment("bifrost", "dev", "prod", "berti")
+            .is_err());
+        assert_eq!(store.secrets("bifrost", "prod").unwrap()["A"], "2");
+    }
+
+    #[test]
+    fn renaming_a_project_keeps_every_value_working() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("bifrost", "prod", "B", "2", "berti").unwrap();
+        store.rename_project("bifrost", "puente", "berti").unwrap();
+        assert_eq!(store.names().unwrap(), vec!["puente/dev", "puente/prod"]);
+        assert_eq!(store.secrets("puente", "dev").unwrap()["A"], "1");
+        assert_eq!(store.secrets("puente", "prod").unwrap()["B"], "2");
+        assert!(store
+            .names()
+            .unwrap()
+            .iter()
+            .all(|name| !name.starts_with("bifrost")));
+    }
+
+    #[test]
+    fn renaming_a_project_onto_another_is_refused() {
+        let store = store();
+        store.set("bifrost", "dev", "A", "1", "berti").unwrap();
+        store.set("axe", "dev", "A", "2", "berti").unwrap();
+        assert!(store.rename_project("bifrost", "axe", "berti").is_err());
+        assert_eq!(store.secrets("axe", "dev").unwrap()["A"], "2");
+    }
+
+    #[test]
+    fn renaming_an_empty_project_is_refused() {
+        let store = store();
+        assert!(store.rename_project("nada", "otro", "berti").is_err());
     }
 
     #[test]
