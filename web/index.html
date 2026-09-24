@@ -32,33 +32,53 @@
         </div>
       </div>
 
-      <table>
-        <thead><tr><th>Clave</th><th>Valor</th><th></th></tr></thead>
-        <tbody id="filas"></tbody>
-      </table>
+      <section class="bloque">
+        <div class="bloque-titulo">
+          <h3>Claves</h3>
+          <span id="cuenta-secretos" class="pildora"></span>
+          <span class="empuje"></span>
+          <button id="env" class="fantasma">copiar .env</button>
+          <button id="refrescar" class="fantasma">refrescar</button>
+        </div>
+        <table><tbody id="filas"></tbody></table>
+        <form id="alta" class="linea">
+          <input id="clave" placeholder="CLAVE" autocomplete="off" spellcheck="false" required>
+          <input id="valor" placeholder="valor" autocomplete="off" spellcheck="false" required>
+          <button>Guardar</button>
+        </form>
+      </section>
 
-      <form id="alta" class="linea">
-        <input id="clave" placeholder="CLAVE" autocomplete="off" spellcheck="false" required>
-        <input id="valor" placeholder="valor" autocomplete="off" spellcheck="false" required>
-        <button>Guardar</button>
-      </form>
+      <section class="bloque">
+        <div class="bloque-titulo">
+          <h3>Tokens</h3>
+          <span id="cuenta-tokens" class="pildora"></span>
+          <span class="empuje"></span>
+          <button id="mostrar-token" class="fantasma">+ token</button>
+        </div>
+        <div id="tokens"></div>
+        <form id="token-nuevo" class="linea" hidden>
+          <input id="token-nombre" placeholder="nombre" autocomplete="off" required>
+          <input id="token-claves" placeholder="claves, separadas por coma (opcional)" autocomplete="off">
+          <input id="token-ttl" placeholder="vence, por ejemplo 2h (opcional)" autocomplete="off">
+          <button>Crear token</button>
+        </form>
+      </section>
 
-      <p class="acciones">
-        <button id="env" class="fantasma">Copiar como .env</button>
-        <button id="refrescar" class="fantasma">Refrescar</button>
-      </p>
-
-      <h3>Tokens</h3>
-      <div id="tokens"></div>
-      <form id="token-nuevo" class="linea">
-        <input id="token-nombre" placeholder="nombre" autocomplete="off" required>
-        <input id="token-claves" placeholder="claves, separadas por coma (opcional)" autocomplete="off">
-        <input id="token-ttl" placeholder="vence, por ejemplo 2h (opcional)" autocomplete="off">
-        <button>Crear token</button>
-      </form>
-
-      <h3>Auditoría</h3>
-      <div id="auditoria"></div>
+      <section class="bloque">
+        <div class="bloque-titulo">
+          <h3>Auditoría</h3>
+          <span class="empuje"></span>
+          <label class="filtro tenue">
+            <input type="checkbox" id="incluir-lecturas">
+            incluir lecturas
+          </label>
+          <label class="filtro tenue">
+            <input type="checkbox" id="solo-entorno">
+            sólo este entorno
+          </label>
+        </div>
+        <div id="auditoria"></div>
+      </section>
     </div>
   </section>
 </main>
