@@ -1,0 +1,284 @@
+:root {
+  --fondo: #fbfbfa;
+  --texto: #1c1c1a;
+  --tenue: #6b6b66;
+  --borde: #e2e2dd;
+  --panel: #ffffff;
+  --acento: #2f6feb;
+  --peligro: #b3261e;
+  --radio: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #16171a;
+    --texto: #e8e8e6;
+    --tenue: #9a9a95;
+    --borde: #2e3034;
+    --panel: #1d1e22;
+    --acento: #6f9cff;
+    --peligro: #ff6b60;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--fondo);
+  color: var(--texto);
+}
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--fondo);
+  border-bottom: 1px solid var(--borde);
+}
+
+h1 {
+  margin: 0;
+  font-size: 17px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+h3 {
+  margin: 24px 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tenue);
+}
+
+#quien {
+  flex: 1;
+  font-size: 13px;
+}
+
+main {
+  padding: 16px;
+}
+
+#entornos {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--borde);
+}
+
+button {
+  font: inherit;
+  padding: 7px 12px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--panel);
+  color: var(--texto);
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--acento);
+}
+
+.fantasma {
+  padding: 4px 8px;
+  font-size: 13px;
+  background: transparent;
+}
+
+.peligro {
+  color: var(--peligro);
+}
+
+.entorno {
+  white-space: nowrap;
+}
+
+.entorno.activo {
+  border-color: var(--acento);
+  color: var(--acento);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--tenue);
+}
+
+th,
+td {
+  padding: 8px 6px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--borde);
+}
+
+td.clave,
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+td.clave {
+  white-space: nowrap;
+}
+
+td.acciones {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.linea {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.linea input {
+  flex: 1 1 160px;
+  padding: 7px 10px;
+  font: inherit;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--panel);
+  color: var(--texto);
+}
+
+.acciones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.fila {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--borde);
+}
+
+.renglon {
+  padding: 3px 0;
+  font-size: 13px;
+  color: var(--tenue);
+}
+
+.tenue {
+  color: var(--tenue);
+}
+
+.nuevo {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--acento);
+  border-radius: var(--radio);
+  background: var(--panel);
+}
+
+.centrado {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 16px;
+}
+
+.tarjeta {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 360px;
+  padding: 24px;
+  border: 1px solid var(--borde);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.tarjeta form {
+  display: grid;
+  gap: 8px;
+}
+
+.tarjeta label {
+  font-size: 13px;
+  color: var(--tenue);
+}
+
+.tarjeta input {
+  padding: 9px 10px;
+  font: inherit;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--fondo);
+  color: var(--texto);
+}
+
+.aviso {
+  margin: 0;
+  font-size: 13px;
+  color: var(--tenue);
+}
+
+.flotante {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  left: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  background: var(--panel);
+}
+
+@media (min-width: 760px) {
+  main {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  #entornos {
+    flex-direction: column;
+    padding: 0 12px 0 0;
+    border-right: 1px solid var(--borde);
+    border-bottom: 0;
+    overflow: visible;
+  }
+
+  .entorno {
+    text-align: left;
+  }
+
+  .flotante {
+    left: auto;
+    width: 320px;
+  }
+}

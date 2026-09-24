@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -28,6 +28,8 @@ fn start() -> Running {
         .env("HEIMDALL_DATA", &root)
         .env("HEIMDALL_MASTER_KEY", "ab".repeat(32))
         .env("HEIMDALL_ADMIN_TOKEN", "hd_admin")
+        .env("HEIMDALL_EMAILS", "berti@ejemplo.com")
+        .env("HEIMDALL_WEB_DEV", "1")
         .env("PORT", "0")
         .stdout(Stdio::piped())
         .spawn()
@@ -328,4 +330,92 @@ fn reading_shows_up_in_the_audit() {
         .unwrap();
     assert_eq!(reader["actor"], "agente");
     assert_eq!(reader["env"], "dev");
+}
+
+fn raw(running: &Running, path: &str, cookie: Option<&str>) -> String {
+    let host = running.url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    if let Some(cookie) = cookie {
+        request.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn status_of(response: &str) -> u16 {
+    response.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+fn cookie_of(response: &str) -> Option<String> {
+    response
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("set-cookie:"))
+        .map(|line| {
+            line["set-cookie:".len()..]
+                .trim()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+}
+
+fn with_cookie(running: &Running, path: &str, cookie: &str) -> (u16, Value) {
+    let url = format!("{}{}", running.url, path);
+    match ureq::get(&url).set("Cookie", cookie).call() {
+        Ok(response) => (200, response.into_json().unwrap_or_else(|_| json!({}))),
+        Err(ureq::Error::Status(status, response)) => {
+            (status, response.into_json().unwrap_or_else(|_| json!({})))
+        }
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn the_magic_link_opens_a_session() {
+    let running = start();
+    wait_for(&running);
+
+    assert_eq!(status_of(&raw(&running, "/", None)), 303);
+
+    let (_, stranger) = call(
+        &running,
+        "POST",
+        "/api/login",
+        "nada",
+        Some(json!({ "email": "otro@ejemplo.com" })),
+    );
+    assert!(stranger["link"].is_null());
+
+    let (_, asked) = call(
+        &running,
+        "POST",
+        "/api/login",
+        "nada",
+        Some(json!({ "email": "berti@ejemplo.com" })),
+    );
+    let link = asked["link"].as_str().expect("sin link").to_string();
+    let token = link.split("token=").nth(1).expect("sin token");
+
+    let entered = raw(&running, &format!("/auth?token={token}"), None);
+    assert_eq!(status_of(&entered), 303);
+    let session = cookie_of(&entered).expect("sin cookie");
+
+    let (status, me) = with_cookie(&running, "/api/me", &session);
+    assert_eq!(status, 200);
+    assert_eq!(me["email"], "berti@ejemplo.com");
+
+    let (status, _) = with_cookie(&running, "/v1/environments", &session);
+    assert_eq!(status, 200);
+
+    assert_eq!(
+        status_of(&raw(&running, &format!("/auth?token={token}"), None)),
+        303
+    );
+    let (status, _) = with_cookie(&running, "/api/me", "heimdall_session=nada");
+    assert_eq!(status, 401);
 }

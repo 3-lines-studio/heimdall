@@ -1,5 +1,5 @@
 use crate::crypto::{self, Key};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,6 +35,18 @@ CREATE TABLE IF NOT EXISTS audit (
     project TEXT NOT NULL,
     env TEXT NOT NULL,
     name TEXT
+);
+CREATE TABLE IF NOT EXISTS logins (
+    hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
 );
 ";
 
@@ -311,6 +323,71 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<serde_json::Value>>>()?)
     }
+
+    pub fn create_login(&self, email: &str, ttl: i64) -> Result<String> {
+        let plain = crypto::random_hex(24).map_err(Error::Internal)?;
+        self.db.execute(
+            "INSERT INTO logins (hash, email, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![crypto::hash(&plain), email, now(), now() + ttl],
+        )?;
+        Ok(plain)
+    }
+
+    pub fn consume_login(&self, plain: &str) -> Result<String> {
+        let hash = crypto::hash(plain);
+        let email: Option<String> = self
+            .db
+            .query_row(
+                "SELECT email FROM logins WHERE hash = ?1 AND expires_at > ?2",
+                params![hash, now()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(email) = email else {
+            return bad("ese link ya no sirve");
+        };
+        self.db
+            .execute("DELETE FROM logins WHERE hash = ?1", params![hash])?;
+        Ok(email)
+    }
+
+    pub fn create_session(&self, email: &str, ttl: i64) -> Result<String> {
+        let plain = crypto::random_hex(24).map_err(Error::Internal)?;
+        self.db.execute(
+            "INSERT INTO sessions (hash, email, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![crypto::hash(&plain), email, now(), now() + ttl],
+        )?;
+        Ok(plain)
+    }
+
+    pub fn session(&self, plain: &str) -> Result<Option<String>> {
+        let email = self
+            .db
+            .query_row(
+                "SELECT email FROM sessions WHERE hash = ?1 AND expires_at > ?2",
+                params![crypto::hash(plain), now()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(email)
+    }
+
+    pub fn drop_session(&self, plain: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM sessions WHERE hash = ?1",
+            params![crypto::hash(plain)],
+        )?;
+        Ok(())
+    }
+
+    pub fn sweep(&self) -> Result<()> {
+        let now = now();
+        self.db
+            .execute("DELETE FROM logins WHERE expires_at <= ?1", params![now])?;
+        self.db
+            .execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])?;
+        Ok(())
+    }
 }
 
 fn row_token(row: &rusqlite::Row) -> rusqlite::Result<Token> {
@@ -572,5 +649,61 @@ mod tests {
             store.names().unwrap(),
             vec!["axe/dev", "bifrost/dev", "bifrost/prod"]
         );
+    }
+
+    #[test]
+    fn a_login_link_works_once() {
+        let store = store();
+        let link = store.create_login("berti@ejemplo.com", 900).unwrap();
+        assert_eq!(store.consume_login(&link).unwrap(), "berti@ejemplo.com");
+        assert!(store.consume_login(&link).is_err());
+    }
+
+    #[test]
+    fn an_expired_login_link_is_refused() {
+        let store = store();
+        let link = store.create_login("berti@ejemplo.com", -1).unwrap();
+        assert!(store.consume_login(&link).is_err());
+    }
+
+    #[test]
+    fn a_session_lives_and_dies() {
+        let store = store();
+        let cookie = store.create_session("berti@ejemplo.com", 60).unwrap();
+        assert_eq!(
+            store.session(&cookie).unwrap().unwrap(),
+            "berti@ejemplo.com"
+        );
+        store.drop_session(&cookie).unwrap();
+        assert!(store.session(&cookie).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_expired_session_is_no_session() {
+        let store = store();
+        let cookie = store.create_session("berti@ejemplo.com", -1).unwrap();
+        assert!(store.session(&cookie).unwrap().is_none());
+    }
+
+    #[test]
+    fn sweeping_clears_what_expired() {
+        let store = store();
+        let login = store.create_login("berti@ejemplo.com", -1).unwrap();
+        let session = store.create_session("berti@ejemplo.com", -1).unwrap();
+        let live = store.create_session("berti@ejemplo.com", 60).unwrap();
+        store.sweep().unwrap();
+        assert!(store.consume_login(&login).is_err());
+        assert!(store.session(&session).unwrap().is_none());
+        assert!(store.session(&live).unwrap().is_some());
+    }
+
+    #[test]
+    fn neither_the_login_nor_the_session_lands_in_clear() {
+        let store = store();
+        let login = store.create_login("berti@ejemplo.com", 900).unwrap();
+        let session = store.create_session("berti@ejemplo.com", 900).unwrap();
+        let raw = dump(&store);
+        assert!(!raw.windows(login.len()).any(|w| w == login.as_bytes()));
+        assert!(!raw.windows(session.len()).any(|w| w == session.as_bytes()));
     }
 }
