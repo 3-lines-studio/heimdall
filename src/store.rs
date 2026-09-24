@@ -1,10 +1,40 @@
 use crate::crypto::{self, Key};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const MAX_VALUE: usize = 64 * 1024;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS secrets (
+    project TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    value BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (project, env, name)
+);
+CREATE TABLE IF NOT EXISTS tokens (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    project TEXT NOT NULL,
+    env TEXT NOT NULL,
+    keys TEXT,
+    hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used INTEGER
+);
+CREATE INDEX IF NOT EXISTS tokens_hash ON tokens (hash);
+CREATE TABLE IF NOT EXISTS audit (
+    at INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    project TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT
+);
+";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Token {
@@ -13,54 +43,64 @@ pub struct Token {
     pub project: String,
     pub env: String,
     pub keys: Option<Vec<String>>,
-    pub hash: String,
-    pub created_at: u64,
-    pub last_used: Option<u64>,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
 }
 
 pub struct Store {
-    root: PathBuf,
+    db: Connection,
     key: Key,
 }
 
 impl Store {
-    pub fn open(root: PathBuf, key: Key) -> Result<Store, String> {
-        fs::create_dir_all(root.join("secrets"))
-            .map_err(|e| format!("no pude crear {root:?}: {e}"))?;
-        Ok(Store { root, key })
+    pub fn open(path: PathBuf, key: Key) -> Result<Store, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("no pude crear {parent:?}: {e}"))?;
+        }
+        let db = Connection::open(&path).map_err(|e| format!("no pude abrir {path:?}: {e}"))?;
+        db.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .map_err(|e| format!("no pude poner {path:?} en WAL: {e}"))?;
+        db.execute_batch(SCHEMA)
+            .map_err(|e| format!("no pude armar el esquema: {e}"))?;
+        Ok(Store { db, key })
+    }
+
+    fn fail(&self, error: rusqlite::Error) -> String {
+        error.to_string()
     }
 
     pub fn names(&self) -> Result<Vec<String>, String> {
-        let dir = self.root.join("secrets");
-        let mut out = Vec::new();
-        let entries = fs::read_dir(&dir).map_err(|e| format!("no pude leer {dir:?}: {e}"))?;
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let project = entry.file_name().to_string_lossy().to_string();
-            let evs =
-                fs::read_dir(entry.path()).map_err(|e| format!("no pude leer {entry:?}: {e}"))?;
-            for ev in evs.flatten() {
-                let file = ev.file_name().to_string_lossy().to_string();
-                if let Some(env) = file.strip_suffix(".enc") {
-                    out.push(format!("{project}/{env}"));
-                }
-            }
-        }
-        out.sort();
-        Ok(out)
+        let mut statement = self
+            .db
+            .prepare("SELECT DISTINCT project || '/' || env FROM secrets ORDER BY 1")
+            .map_err(|e| self.fail(e))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| self.fail(e))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|e| self.fail(e))
     }
 
     pub fn secrets(&self, project: &str, env: &str) -> Result<BTreeMap<String, String>, String> {
-        let path = self.secrets_path(project, env)?;
-        if !path.exists() {
-            return Ok(BTreeMap::new());
+        let subkey = self.key.derive(&context(project, env));
+        let mut statement = self
+            .db
+            .prepare("SELECT name, value FROM secrets WHERE project = ?1 AND env = ?2")
+            .map_err(|e| self.fail(e))?;
+        let rows = statement
+            .query_map(params![project, env], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| self.fail(e))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (name, value) = row.map_err(|e| self.fail(e))?;
+            let plain = subkey.open(&value)?;
+            let text = String::from_utf8(plain).map_err(|_| format!("{name} no es texto"))?;
+            out.insert(name, text);
         }
-        let blob = fs::read(&path).map_err(|e| format!("no pude leer {path:?}: {e}"))?;
-        let plain = self.key.derive(&context(project, env)).open(&blob)?;
-        serde_json::from_slice(&plain)
-            .map_err(|e| format!("{path:?} no es un mapa de secretos: {e}"))
+        Ok(out)
     }
 
     pub fn set(
@@ -77,49 +117,55 @@ impl Store {
         if value.len() > MAX_VALUE {
             return Err(format!("el valor pasa los {MAX_VALUE} bytes"));
         }
-        let mut map = self.secrets(project, env)?;
-        map.insert(name.to_string(), value.to_string());
-        self.write_secrets(project, env, &map)?;
+        let sealed = self
+            .key
+            .derive(&context(project, env))
+            .seal(value.as_bytes())?;
+        self.db
+            .execute(
+                "INSERT INTO secrets (project, env, name, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (project, env, name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![project, env, name, sealed, now()],
+            )
+            .map_err(|e| self.fail(e))?;
         self.audit(actor, "set", project, env, Some(name))
     }
 
     pub fn unset(&self, project: &str, env: &str, name: &str, actor: &str) -> Result<(), String> {
-        let mut map = self.secrets(project, env)?;
-        if map.remove(name).is_none() {
+        let removed = self
+            .db
+            .execute(
+                "DELETE FROM secrets WHERE project = ?1 AND env = ?2 AND name = ?3",
+                params![project, env, name],
+            )
+            .map_err(|e| self.fail(e))?;
+        if removed == 0 {
             return Err(format!("{name} no está en {project}/{env}"));
         }
-        self.write_secrets(project, env, &map)?;
         self.audit(actor, "unset", project, env, Some(name))
     }
 
-    fn write_secrets(
-        &self,
-        project: &str,
-        env: &str,
-        map: &BTreeMap<String, String>,
-    ) -> Result<(), String> {
-        let path = self.secrets_path(project, env)?;
-        let plain = serde_json::to_vec(map).map_err(|e| format!("no pude serializar: {e}"))?;
-        let blob = self.key.derive(&context(project, env)).seal(&plain)?;
-        write_atomic(&path, &blob)
-    }
-
-    fn secrets_path(&self, project: &str, env: &str) -> Result<PathBuf, String> {
-        slug(project)?;
-        slug(env)?;
-        let dir = self.root.join("secrets").join(project);
-        fs::create_dir_all(&dir).map_err(|e| format!("no pude crear {dir:?}: {e}"))?;
-        Ok(dir.join(format!("{env}.enc")))
-    }
-
     pub fn tokens(&self) -> Result<Vec<Token>, String> {
-        let path = self.root.join("tokens.enc");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let blob = fs::read(&path).map_err(|e| format!("no pude leer {path:?}: {e}"))?;
-        let plain = self.key.derive("tokens").open(&blob)?;
-        serde_json::from_slice(&plain).map_err(|e| format!("{path:?} no son tokens: {e}"))
+        let mut statement = self
+            .db
+            .prepare("SELECT id, name, project, env, keys, created_at, last_used FROM tokens ORDER BY created_at")
+            .map_err(|e| self.fail(e))?;
+        let rows = statement
+            .query_map([], |row| {
+                let keys: Option<String> = row.get(4)?;
+                Ok(Token {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    project: row.get(2)?,
+                    env: row.get(3)?,
+                    keys: keys.and_then(|text| serde_json::from_str(&text).ok()),
+                    created_at: row.get(5)?,
+                    last_used: row.get(6)?,
+                })
+            })
+            .map_err(|e| self.fail(e))?;
+        rows.collect::<rusqlite::Result<Vec<Token>>>()
+            .map_err(|e| self.fail(e))
     }
 
     pub fn create_token(
@@ -142,24 +188,41 @@ impl Store {
             project: project.to_string(),
             env: env.to_string(),
             keys,
-            hash: crypto::hash(&plain),
             created_at: now(),
             last_used: None,
         };
-        let mut tokens = self.tokens()?;
-        tokens.push(token.clone());
-        self.write_tokens(&tokens)?;
+        let keys = token
+            .keys
+            .as_ref()
+            .map(|keys| serde_json::to_string(keys).unwrap_or_default());
+        self.db
+            .execute(
+                "INSERT INTO tokens (id, name, project, env, keys, hash, created_at, last_used)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                params![
+                    token.id,
+                    token.name,
+                    token.project,
+                    token.env,
+                    keys,
+                    crypto::hash(&plain),
+                    token.created_at
+                ],
+            )
+            .map_err(|e| self.fail(e))?;
         self.audit(actor, "token-create", project, env, Some(&token.name))?;
         Ok((token, plain))
     }
 
     pub fn revoke(&self, id: &str, actor: &str) -> Result<Token, String> {
-        let mut tokens = self.tokens()?;
-        let Some(index) = tokens.iter().position(|token| token.id == id) else {
-            return Err(format!("no hay token {id}"));
-        };
-        let token = tokens.remove(index);
-        self.write_tokens(&tokens)?;
+        let token = self
+            .tokens()?
+            .into_iter()
+            .find(|token| token.id == id)
+            .ok_or_else(|| format!("no hay token {id}"))?;
+        self.db
+            .execute("DELETE FROM tokens WHERE id = ?1", params![id])
+            .map_err(|e| self.fail(e))?;
         self.audit(
             actor,
             "token-revoke",
@@ -172,25 +235,44 @@ impl Store {
 
     pub fn find(&self, plain: &str) -> Result<Option<Token>, String> {
         let presented = crypto::hash(plain);
-        let tokens = self.tokens()?;
-        Ok(tokens
-            .into_iter()
-            .find(|token| crypto::equal(&token.hash, &presented)))
+        let mut statement = self
+            .db
+            .prepare("SELECT id, name, project, env, keys, created_at, last_used, hash FROM tokens")
+            .map_err(|e| self.fail(e))?;
+        let rows = statement
+            .query_map([], |row| {
+                let keys: Option<String> = row.get(4)?;
+                Ok((
+                    Token {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        project: row.get(2)?,
+                        env: row.get(3)?,
+                        keys: keys.and_then(|text| serde_json::from_str(&text).ok()),
+                        created_at: row.get(5)?,
+                        last_used: row.get(6)?,
+                    },
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|e| self.fail(e))?;
+        for row in rows {
+            let (token, hash) = row.map_err(|e| self.fail(e))?;
+            if crypto::equal(&hash, &presented) {
+                return Ok(Some(token));
+            }
+        }
+        Ok(None)
     }
 
     pub fn touch(&self, id: &str) -> Result<(), String> {
-        let mut tokens = self.tokens()?;
-        let Some(token) = tokens.iter_mut().find(|token| token.id == id) else {
-            return Ok(());
-        };
-        token.last_used = Some(now());
-        self.write_tokens(&tokens)
-    }
-
-    fn write_tokens(&self, tokens: &[Token]) -> Result<(), String> {
-        let plain = serde_json::to_vec(tokens).map_err(|e| format!("no pude serializar: {e}"))?;
-        let blob = self.key.derive("tokens").seal(&plain)?;
-        write_atomic(&self.root.join("tokens.enc"), &blob)
+        self.db
+            .execute(
+                "UPDATE tokens SET last_used = ?2 WHERE id = ?1",
+                params![id, now()],
+            )
+            .map_err(|e| self.fail(e))?;
+        Ok(())
     }
 
     pub fn audit(
@@ -201,36 +283,34 @@ impl Store {
         env: &str,
         name: Option<&str>,
     ) -> Result<(), String> {
-        let entry = serde_json::json!({
-            "at": now(),
-            "actor": actor,
-            "action": action,
-            "project": project,
-            "env": env,
-            "key": name,
-        });
-        let line = format!("{entry}\n");
-        let path = self.root.join("audit.jsonl");
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("no pude abrir {path:?}: {e}"))?;
-        use std::io::Write;
-        file.write_all(line.as_bytes())
-            .map_err(|e| format!("no pude escribir {path:?}: {e}"))
+        self.db
+            .execute(
+                "INSERT INTO audit (at, actor, action, project, env, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![now(), actor, action, project, env, name],
+            )
+            .map_err(|e| self.fail(e))?;
+        Ok(())
     }
 
     pub fn audit_log(&self) -> Result<Vec<serde_json::Value>, String> {
-        let path = self.root.join("audit.jsonl");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let text = fs::read_to_string(&path).map_err(|e| format!("no pude leer {path:?}: {e}"))?;
-        Ok(text
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect())
+        let mut statement = self
+            .db
+            .prepare("SELECT at, actor, action, project, env, name FROM audit ORDER BY at, rowid")
+            .map_err(|e| self.fail(e))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "at": row.get::<_, i64>(0)?,
+                    "actor": row.get::<_, String>(1)?,
+                    "action": row.get::<_, String>(2)?,
+                    "project": row.get::<_, String>(3)?,
+                    "env": row.get::<_, String>(4)?,
+                    "key": row.get::<_, Option<String>>(5)?,
+                }))
+            })
+            .map_err(|e| self.fail(e))?;
+        rows.collect::<rusqlite::Result<Vec<serde_json::Value>>>()
+            .map_err(|e| self.fail(e))
     }
 }
 
@@ -238,17 +318,11 @@ fn context(project: &str, env: &str) -> String {
     format!("secrets/{project}/{env}")
 }
 
-fn now() -> u64 {
+fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).map_err(|e| format!("no pude escribir {tmp:?}: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| format!("no pude mover {tmp:?}: {e}"))
 }
 
 pub fn slug(name: &str) -> Result<(), String> {
@@ -281,9 +355,7 @@ fn key_name(name: &str) -> Result<(), String> {
 
 #[cfg(test)]
 pub fn temp_root() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("heimdall-{}", crypto::random_hex(6).unwrap()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    std::env::temp_dir().join(format!("heimdall-{}.db", crypto::random_hex(6).unwrap()))
 }
 
 #[cfg(test)]
@@ -294,17 +366,31 @@ mod tests {
         Store::open(temp_root(), Key::from_hex(&"ab".repeat(32)).unwrap()).unwrap()
     }
 
+    fn dump(store: &Store) -> Vec<u8> {
+        let path: String = store
+            .db
+            .query_row("PRAGMA database_list", [], |row| row.get(2))
+            .unwrap();
+        let mut out = std::fs::read(&path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{path}-wal")) {
+            out.extend_from_slice(&wal);
+        }
+        out
+    }
+
     #[test]
     fn a_secret_survives_a_reopen() {
-        let root = temp_root();
+        let path = temp_root();
         let key = Key::from_hex(&"ab".repeat(32)).unwrap();
-        Store::open(root.clone(), key.clone())
+        Store::open(path.clone(), key.clone())
             .unwrap()
             .set("bifrost", "dev", "STRIPE_KEY", "sk_test_123", "berti")
             .unwrap();
-        let reopened = Store::open(root, key).unwrap();
-        let map = reopened.secrets("bifrost", "dev").unwrap();
-        assert_eq!(map.get("STRIPE_KEY").unwrap(), "sk_test_123");
+        let reopened = Store::open(path, key).unwrap();
+        assert_eq!(
+            reopened.secrets("bifrost", "dev").unwrap()["STRIPE_KEY"],
+            "sk_test_123"
+        );
     }
 
     #[test]
@@ -313,7 +399,7 @@ mod tests {
         store
             .set("bifrost", "dev", "DB_PASSWORD", "hunter2", "berti")
             .unwrap();
-        let raw = fs::read(store.root.join("secrets/bifrost/dev.enc")).unwrap();
+        let raw = dump(&store);
         assert!(!raw.windows(7).any(|w| w == b"hunter2"));
     }
 
@@ -329,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn names_cannot_escape_the_root() {
+    fn bad_names_are_rejected() {
         let store = store();
         assert!(store.set("../etc", "dev", "A", "1", "berti").is_err());
         assert!(store.set("bifrost", "..", "A", "1", "berti").is_err());
@@ -377,8 +463,19 @@ mod tests {
         let (_, plain) = store
             .create_token("agente", "bifrost", "dev", None, "berti")
             .unwrap();
-        let raw = fs::read(store.root.join("tokens.enc")).unwrap();
+        let raw = dump(&store);
         assert!(!raw.windows(plain.len()).any(|w| w == plain.as_bytes()));
+    }
+
+    #[test]
+    fn a_used_token_says_so() {
+        let store = store();
+        let (token, _) = store
+            .create_token("agente", "bifrost", "dev", None, "berti")
+            .unwrap();
+        assert!(store.tokens().unwrap()[0].last_used.is_none());
+        store.touch(&token.id).unwrap();
+        assert!(store.tokens().unwrap()[0].last_used.is_some());
     }
 
     #[test]
@@ -390,8 +487,7 @@ mod tests {
         let log = store.audit_log().unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0]["key"], "DB_PASSWORD");
-        let raw = fs::read_to_string(store.root.join("audit.jsonl")).unwrap();
-        assert!(!raw.contains("hunter2"));
+        assert!(!String::from_utf8_lossy(&dump(&store)).contains("hunter2"));
     }
 
     #[test]

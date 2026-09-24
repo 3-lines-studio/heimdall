@@ -8,13 +8,14 @@ Nobody gets into the service. The only way to a secret is the API, with a token.
 
 ## How it works
 
-- Each `project/environment` is one file under `secrets/<project>/<env>.enc`,
-  sealed with XChaCha20-Poly1305. The key is derived with blake3 from
-  `HEIMDALL_MASTER_KEY` and that file's own context, so one file never opens
-  another.
+- One SQLite file in the volume, in WAL. Each value is sealed on its own with
+  XChaCha20-Poly1305, and the key is derived with blake3 from
+  `HEIMDALL_MASTER_KEY` plus that environment's context, so one environment
+  never opens another. Project names, key names, tokens and audit rows stay
+  readable: a dump of the volume gives up no secret, but it does show which
+  services exist.
 - Tokens are stored hashed, with their scope. A token for `bifrost/dev` cannot
   read `bifrost/prod`: no request returns it, and asking for it is a 403.
-- Writes go to a temp file and get renamed, so a crash never leaves half a map.
 - The audit log records who touched what, never a value.
 
 ## The service

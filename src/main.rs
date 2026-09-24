@@ -28,7 +28,7 @@ fn serve() -> Result<(), String> {
         .ok()
         .and_then(|port| port.parse().ok())
         .unwrap_or(8080);
-    let store = store::Store::open(root.into(), key)?;
+    let store = store::Store::open(std::path::PathBuf::from(root).join("heimdall.db"), key)?;
     let server = Arc::new(Server {
         store: Mutex::new(store),
         admin,
