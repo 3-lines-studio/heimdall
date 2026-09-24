@@ -1,5 +1,6 @@
 use crate::crypto;
 use crate::http::{self, Request};
+use crate::mail::Mail;
 use crate::store::{self, Error, NewToken, Store, Token};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -7,6 +8,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+pub const COOKIE: &str = "heimdall_session";
 
 const MAX_LIVE: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -17,6 +20,10 @@ type Reply = Result<Value, (u16, String)>;
 pub struct Server {
     pub store: Mutex<Store>,
     pub admin: String,
+    pub emails: Vec<String>,
+    pub mail: Option<Mail>,
+    pub link_base: String,
+    pub dev: bool,
 }
 
 enum Actor {
@@ -82,6 +89,9 @@ fn handle(server: &Arc<Server>, stream: &mut TcpStream) -> std::io::Result<()> {
     if request.too_large {
         return http::send_error(stream, 413, "eso es demasiado grande");
     }
+    if !request.path.starts_with("/v1/") {
+        return crate::web::handle(server, &request, stream);
+    }
     let store = server.store.lock().unwrap_or_else(|e| e.into_inner());
     match route(server, &store, &request) {
         Ok(value) => http::send_json(stream, 200, &value),
@@ -130,6 +140,13 @@ fn authenticate(
     store: &Store,
     request: &Request,
 ) -> std::result::Result<Actor, (u16, String)> {
+    if let Some(cookie) = request.cookie(COOKIE) {
+        match store.session(&cookie) {
+            Ok(Some(email)) => return Ok(Actor::Admin(email)),
+            Ok(None) => {}
+            Err(error) => return Err(internal(error)),
+        }
+    }
     let Some(presented) = request.bearer() else {
         return Err((401, "falta el token".to_string()));
     };
@@ -291,6 +308,10 @@ mod tests {
         Arc::new(Server {
             store: Mutex::new(store),
             admin: "hd_admin".to_string(),
+            emails: vec!["berti@ejemplo.com".to_string()],
+            mail: None,
+            link_base: "http://localhost:8080".to_string(),
+            dev: true,
         })
     }
 

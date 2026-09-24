@@ -36,6 +36,28 @@ break-glass key.
 
 `heimdall` with no arguments serves; `heimdall serve` does the same.
 
+## The web
+
+`/` is the same store with a face: pick an environment, see the keys, reveal a
+value, add or delete one, create a token and read the audit. It is one static
+page and a little JavaScript over the same API, so there is nothing new to
+learn and nothing new to trust.
+
+You get in with a magic link. Only the addresses in `HEIMDALL_EMAILS` get one;
+the link lives fifteen minutes and works once, and the session is an
+`HttpOnly`, `SameSite=Strict` cookie for thirty days.
+
+```
+HEIMDALL_EMAILS=me@example.com,otro@example.com
+HEIMDALL_URL=https://heimdall.example.com   # to build the link
+RESEND_API_KEY=...                          # without it, the link goes to the log
+HEIMDALL_FROM="Heimdall <heimdall@example.com>"
+HEIMDALL_WEB_DEV=1                          # answers the link instead of mailing it
+```
+
+The page is `/`, the login is `/login`, and `/auth?token=` is what the link
+points at.
+
 ## The client
 
 ```

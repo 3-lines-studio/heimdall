@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heimdall</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Heimdall</h1>
+  <span id="quien" class="tenue"></span>
+  <button id="salir" class="fantasma">Salir</button>
+</header>
+
+<main>
+  <nav id="entornos" aria-label="Proyectos y entornos"></nav>
+
+  <section id="panel">
+    <p id="vacio" class="tenue">Elegí un entorno.</p>
+
+    <div id="contenido" hidden>
+      <h2 id="titulo"></h2>
+
+      <table>
+        <thead><tr><th>Clave</th><th>Valor</th><th></th></tr></thead>
+        <tbody id="filas"></tbody>
+      </table>
+
+      <form id="alta" class="linea">
+        <input id="clave" placeholder="CLAVE" autocomplete="off" spellcheck="false" required>
+        <input id="valor" placeholder="valor" autocomplete="off" spellcheck="false" required>
+        <button>Guardar</button>
+      </form>
+
+      <p class="acciones">
+        <button id="env" class="fantasma">Copiar como .env</button>
+        <button id="refrescar" class="fantasma">Refrescar</button>
+      </p>
+
+      <h3>Tokens</h3>
+      <div id="tokens"></div>
+      <form id="token-nuevo" class="linea">
+        <input id="token-nombre" placeholder="nombre" autocomplete="off" required>
+        <input id="token-claves" placeholder="claves, separadas por coma (opcional)" autocomplete="off">
+        <input id="token-ttl" placeholder="vence, por ejemplo 2h (opcional)" autocomplete="off">
+        <button>Crear token</button>
+      </form>
+
+      <h3>Auditoría</h3>
+      <div id="auditoria"></div>
+    </div>
+  </section>
+</main>
+
+<p id="aviso" class="aviso flotante" hidden></p>
+<script src="/app.js"></script>
+</body>
+</html>

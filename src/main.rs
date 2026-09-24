@@ -1,8 +1,10 @@
 mod cli;
 mod crypto;
 mod http;
+mod mail;
 mod server;
 mod store;
+mod web;
 
 use crypto::Key;
 use server::Server;
@@ -29,9 +31,25 @@ fn serve() -> Result<(), String> {
         .and_then(|port| port.parse().ok())
         .unwrap_or(8080);
     let store = store::Store::open(std::path::PathBuf::from(root).join("heimdall.db"), key)?;
+    let emails: Vec<String> = std::env::var("HEIMDALL_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty())
+        .collect();
+    if emails.is_empty() {
+        eprintln!("heimdall: HEIMDALL_EMAILS está vacío, no va a poder entrar nadie");
+    }
     let server = Arc::new(Server {
         store: Mutex::new(store),
         admin,
+        emails,
+        mail: mail::Mail::from_env(),
+        link_base: std::env::var("HEIMDALL_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string())
+            .trim_end_matches('/')
+            .to_string(),
+        dev: std::env::var("HEIMDALL_WEB_DEV").is_ok(),
     });
     let listener = server::listen(port)?;
     let address = listener

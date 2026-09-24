@@ -28,6 +28,17 @@ impl Request {
         self.header("authorization")?.strip_prefix("Bearer ")
     }
 
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        for part in self.header("cookie")?.split(';') {
+            if let Some((key, value)) = part.trim().split_once('=') {
+                if key == name {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
+    }
+
     pub fn json(&self) -> Option<serde_json::Value> {
         serde_json::from_slice(&self.body).ok()
     }
@@ -144,6 +155,25 @@ pub fn send_error(stream: &mut TcpStream, status: u16, message: &str) -> std::io
     send_json(stream, status, &serde_json::json!({ "error": message }))
 }
 
+pub fn send_json_with(
+    stream: &mut TcpStream,
+    status: u16,
+    value: &serde_json::Value,
+    extra: &[(&str, &str)],
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(value).unwrap_or_default();
+    respond(stream, status, "application/json", extra, &body)
+}
+
+pub fn send_text(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    text: &str,
+) -> std::io::Result<()> {
+    respond(stream, status, content_type, &[], text.as_bytes())
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -213,6 +243,23 @@ mod tests {
         let pairs = parse_pairs("project=bifrost&env=dev");
         assert_eq!(pairs.get("project").unwrap(), "bifrost");
         assert_eq!(pairs.get("env").unwrap(), "dev");
+    }
+
+    #[test]
+    fn cookie_reads_one_value() {
+        let request = Request {
+            method: "GET".into(),
+            path: "/".into(),
+            query: HashMap::new(),
+            headers: HashMap::from([(
+                "cookie".to_string(),
+                "a=1; heimdall_session=abc; b=2".to_string(),
+            )]),
+            body: Vec::new(),
+            too_large: false,
+        };
+        assert_eq!(request.cookie("heimdall_session"), Some("abc".to_string()));
+        assert_eq!(request.cookie("otra"), None);
     }
 
     #[test]
