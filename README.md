@@ -72,23 +72,61 @@ handful of lines of JavaScript turn the fragment into a session.
 
 ## The client
 
+The command line speaks the same language as `doppler run`, so swapping one for
+the other is a find and replace: `-p`/`--project`, `-c`/`--config`, the `--`
+before the command, and a `heimdall.yaml` in the repository that says which
+environment you are on (the shape of `doppler.yaml`).
+
 ```
 export HEIMDALL_URL=https://heimdall.example.com
-export HEIMDALL_TOKEN=<the admin token, or an agent one>
 
-heimdall set STRIPE_KEY=sk_test_1 --project bifrost --env dev
-heimdall ls --project bifrost --env dev
+heimdall login --token <a token, or an agent one>   # leaves it in ~/.heimdall/token
+heimdall setup --project bifrost --config dev       # writes ./heimdall.yaml
+
+heimdall run -- npm test
+heimdall set STRIPE_KEY=sk_test_1
+heimdall ls
 heimdall environments
-heimdall token create --name agente --project bifrost --env dev --keys STRIPE_KEY --ttl 1h
-heimdall token create --name jimmy --admin --ttl 24h
+heimdall token create --name agente --keys STRIPE_KEY --ttl 1h
 heimdall token list
 heimdall token revoke --id 3f9c1a
 heimdall audit
-heimdall run --project bifrost --env dev -- npm test
 ```
+
+`setup` writes the project and the environment into `heimdall.yaml`:
+
+```yaml
+setup:
+  - project: bifrost
+    config: dev
+```
+
+Every command reads that file from the working directory upwards, so a
+subdirectory works the same as the root, and an explicit flag always wins over
+it. In a Makefile that is a single word changed:
+
+```makefile
+start:
+	@ENV=local doppler run --preserve-env --preserve-env -- go run ./cmd/server
+
+# becomes
+
+start:
+	@ENV=local heimdall run --preserve-env --preserve-env -- go run ./cmd/server
+```
+
+The scope does not live in the file alone: what a token reaches is what the
+token says. A token for `bifrost/dev` gets a 403 from `run -c prod`, and the
+repository has no way around it.
 
 `run` puts whatever the token sees into the command's environment and takes
 `HEIMDALL_TOKEN` out of it, so the child cannot read the store on its own.
+**Whatever the shell already defines wins**: if you exported a variable, that is
+the one the command gets. `--preserve-env` is accepted for compatibility with
+Doppler, and is what heimdall does either way.
+
+The token comes from `HEIMDALL_TOKEN` when it is set, and otherwise from the
+file `heimdall login` wrote. `heimdall logout` removes it.
 
 ## The API
 
