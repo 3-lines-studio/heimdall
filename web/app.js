@@ -53,9 +53,10 @@ async function cargarEntornos() {
   const lista = await api('GET', '/v1/environments');
   const nav = $('entornos');
   nav.replaceChildren();
+  nav.append(boton('+ nuevo', 'fantasma', empezar));
   if (!lista.length) {
     nav.append(nodo('p', 'Todavía no hay secretos.', 'tenue'));
-    return;
+    return lista;
   }
   for (const nombre of lista) {
     const [project, env] = nombre.split('/');
@@ -63,6 +64,14 @@ async function cargarEntornos() {
     const elemento = boton(nombre, activo ? 'entorno activo' : 'entorno', () => abrir(project, env));
     nav.append(elemento);
   }
+  return lista;
+}
+
+function empezar() {
+  $('contenido').hidden = true;
+  $('vacio').hidden = true;
+  $('primer').hidden = false;
+  $('primer-project').focus();
 }
 
 async function abrir(project, env) {
@@ -76,6 +85,7 @@ async function abrir(project, env) {
     return;
   }
   $('vacio').hidden = true;
+  $('primer').hidden = true;
   $('contenido').hidden = false;
   $('titulo').textContent = `${project} / ${env}`;
   renderSecretos();
@@ -170,6 +180,24 @@ async function cargarAuditoria() {
   }
 }
 
+$('primer').addEventListener('submit', async (evento) => {
+  evento.preventDefault();
+  const project = $('primer-project').value.trim();
+  const env = $('primer-env').value.trim();
+  const clave = $('primer-clave').value.trim();
+  const valor = $('primer-valor').value;
+  try {
+    await api('PUT', '/v1/secrets', { project, env, key: clave, value: valor });
+  } catch (error) {
+    aviso(error.message);
+    return;
+  }
+  $('primer').hidden = true;
+  for (const id of ['primer-project', 'primer-env', 'primer-clave', 'primer-valor']) $(id).value = '';
+  await abrir(project, env);
+  aviso(`${clave} guardada en ${project}/${env}.`);
+});
+
 $('alta').addEventListener('submit', async (evento) => {
   evento.preventDefault();
   const clave = $('clave').value.trim();
@@ -238,7 +266,7 @@ async function arrancar() {
     location.href = '/login';
     return;
   }
-  await cargarEntornos();
+  if (!(await cargarEntornos()).length) empezar();
 }
 
 arrancar();

@@ -20,6 +20,19 @@
   <section id="panel">
     <p id="vacio" class="tenue">Elegí un entorno.</p>
 
+    <form id="primer" hidden>
+      <p class="tenue">Todavía no hay nada. El proyecto y el entorno se crean con el primer secreto: minúsculas, números, guiones.</p>
+      <div class="linea">
+        <input id="primer-project" placeholder="proyecto" autocomplete="off" spellcheck="false" required>
+        <input id="primer-env" placeholder="entorno, por ejemplo dev" autocomplete="off" spellcheck="false" required>
+      </div>
+      <div class="linea">
+        <input id="primer-clave" placeholder="CLAVE" autocomplete="off" spellcheck="false" required>
+        <input id="primer-valor" placeholder="valor" autocomplete="off" spellcheck="false" required>
+      </div>
+      <p class="acciones"><button>Crear y guardar</button></p>
+    </form>
+
     <div id="contenido" hidden>
       <h2 id="titulo"></h2>
 
