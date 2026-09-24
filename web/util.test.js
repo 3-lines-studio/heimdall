@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { segundos, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
+const { segundos, describir, hace, falta, agrupar, esSlug, clavesDe, comoEnv, urlDeClaves, alcanceDeToken } = require("./util.js");
 
 test("el vencimiento se escribe con su unidad", () => {
   assert.equal(segundos("30s"), 30);
@@ -16,6 +16,32 @@ test("un vencimiento que no se entiende no es un número", () => {
   assert.equal(segundos(""), null);
   assert.equal(segundos("0h"), null);
   assert.equal(segundos("-2h"), null);
+});
+
+test("cada acción se cuenta en castellano con su tono", () => {
+  assert.deepEqual(describir("set"), { texto: "guardó", clase: "escritura" });
+  assert.deepEqual(describir("get-secrets"), { texto: "leyó", clase: "lectura" });
+  assert.deepEqual(describir("project-drop"), { texto: "borró el proyecto", clase: "borrado" });
+  assert.deepEqual(describir("vaya-uno-a-saber"), {
+    texto: "vaya-uno-a-saber",
+    clase: "lectura",
+  });
+});
+
+test("el paso del tiempo se cuenta corto", () => {
+  const ahora = 1_800_000_000;
+  assert.equal(hace(ahora - 10, ahora), "recién");
+  assert.equal(hace(ahora - 300, ahora), "hace 5 min");
+  assert.equal(hace(ahora - 7200, ahora), "hace 2 h");
+  assert.equal(hace(ahora - 3 * 86400, ahora), "hace 3 d");
+});
+
+test("el vencimiento se cuenta para adelante", () => {
+  const ahora = 1_800_000_000;
+  assert.equal(falta(ahora + 900, ahora), "vence en 15 min");
+  assert.equal(falta(ahora + 7200, ahora), "vence en 2 h");
+  assert.equal(falta(ahora + 2 * 86400, ahora), "vence en 2 d");
+  assert.equal(falta(ahora - 1, ahora), "venció");
 });
 
 test("los entornos se agrupan por proyecto y salen ordenados", () => {

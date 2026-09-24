@@ -66,7 +66,32 @@ async function copiar(texto) {
   }
 }
 
-const fecha = (cuando) => new Date(cuando * 1000).toLocaleString();
+const ahora = () => Math.floor(Date.now() / 1000);
+
+function diaDe(cuando) {
+  return new Date(cuando * 1000).toDateString();
+}
+
+function etiquetaDeDia(cuando) {
+  const hoy = diaDe(ahora());
+  const ayer = diaDe(ahora() - 86400);
+  const suyo = diaDe(cuando);
+  if (suyo === hoy) return 'Hoy';
+  if (suyo === ayer) return 'Ayer';
+  return new Date(cuando * 1000).toLocaleDateString();
+}
+
+function horaDe(cuando) {
+  return new Date(cuando * 1000).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function pildora(texto, clase) {
+  return nodo('span', texto, clase ? `pildora ${clase}` : 'pildora');
+}
 
 function guardarAbiertos() {
   localStorage.setItem('abiertos', JSON.stringify([...estado.abiertos]));
@@ -370,9 +395,10 @@ function renderSecretos() {
   const filas = $('filas');
   filas.replaceChildren();
   const claves = Object.keys(estado.secretos).sort();
+  $('cuenta-secretos').textContent = claves.length;
   if (!claves.length) {
     const fila = nodo('tr');
-    const celda = nodo('td', 'Vacío: agregá una clave abajo.', 'tenue');
+    const celda = nodo('td', 'Todavía no hay ninguna clave.', 'tenue');
     celda.colSpan = 3;
     fila.append(celda);
     filas.append(fila);
@@ -386,15 +412,15 @@ function renderSecretos() {
     const celda = nodo('td');
     celda.append(nodo('code', revelado ? valor : '••••••••'));
     fila.append(celda);
-    const acciones = nodo('td', null, 'acciones');
+    const acciones = nodo('div', null, 'acciones');
     acciones.append(
-      boton(revelado ? 'Ocultar' : 'Ver', 'fantasma', () => {
+      boton(revelado ? 'ocultar' : 'ver', 'fantasma', () => {
         if (revelado) estado.revelados.delete(clave);
         else estado.revelados.add(clave);
         renderSecretos();
       }),
-      boton('Copiar', 'fantasma', () => copiar(valor)),
-      boton('Borrar', 'peligro', async () => {
+      boton('copiar', 'fantasma', () => copiar(valor)),
+      boton('borrar', 'peligro', async () => {
         const bien = await confirmar(`Vas a borrar ${clave} de ${estado.project}/${estado.env}.`);
         if (!bien) return;
         try {
@@ -407,7 +433,9 @@ function renderSecretos() {
         }
       })
     );
-    fila.append(acciones);
+    const celdaAcciones = nodo('td', null, 'celda-acciones');
+    celdaAcciones.append(acciones);
+    fila.append(celdaAcciones);
     filas.append(fila);
   }
 }
@@ -416,21 +444,28 @@ async function cargarTokens() {
   const caja = $('tokens');
   caja.replaceChildren();
   const lista = await api('GET', '/v1/tokens');
+  $('cuenta-tokens').textContent = lista.length;
   if (!lista.length) {
     caja.append(nodo('p', 'No hay tokens.', 'tenue'));
     return;
   }
   for (const token of lista) {
-    const fila = nodo('div', null, 'fila');
-    const detalles = [alcanceDeToken(token)];
-    if (token.expires_at) detalles.push(`vence ${fecha(token.expires_at)}`);
-    detalles.push(token.last_used ? `último uso ${fecha(token.last_used)}` : 'sin uso');
-    const texto = nodo('div');
-    texto.append(nodo('strong', token.name));
-    texto.append(nodo('span', ' ' + detalles.join(' · '), 'tenue'));
-    fila.append(texto);
-    fila.append(
-      boton('Revocar', 'peligro', async () => {
+    const tarjeta = nodo('div', null, 'token');
+    const cuerpo = nodo('div', null, 'cuerpo');
+    const principal = nodo('div', null, 'principal');
+    principal.append(nodo('strong', token.name));
+    principal.append(pildora(token.admin ? 'administra' : `${token.project}/${token.env}`));
+    if (token.keys?.length) principal.append(pildora(`sólo ${token.keys.join(', ')}`, 'suave'));
+    cuerpo.append(principal);
+
+    const detalles = [];
+    if (token.expires_at) detalles.push(falta(token.expires_at, ahora()));
+    detalles.push(token.last_used ? `último uso ${hace(token.last_used, ahora())}` : 'sin uso');
+    cuerpo.append(nodo('div', detalles.join(' · '), 'tenue detalle'));
+    tarjeta.append(cuerpo);
+
+    tarjeta.append(
+      boton('revocar', 'fantasma peligro', async () => {
         const bien = await confirmar(`Vas a revocar el token ${token.name}.`);
         if (!bien) return;
         try {
@@ -442,22 +477,46 @@ async function cargarTokens() {
         }
       })
     );
-    caja.append(fila);
+    caja.append(tarjeta);
   }
 }
 
+let auditoria = [];
+
 async function cargarAuditoria() {
+  auditoria = await api('GET', '/v1/audit?limit=200');
+  renderAuditoria();
+}
+
+function renderAuditoria() {
   const caja = $('auditoria');
   caja.replaceChildren();
-  const lista = await api('GET', '/v1/audit?limit=50');
+  const solo = $('solo-entorno').checked;
+  const lecturas = $('incluir-lecturas').checked;
+  let lista = auditoria;
+  if (solo) lista = lista.filter((entrada) => entrada.project === estado.project && entrada.env === estado.env);
+  if (!lecturas) lista = lista.filter((entrada) => describir(entrada.action).clase !== 'lectura');
   if (!lista.length) {
     caja.append(nodo('p', 'Sin movimientos.', 'tenue'));
     return;
   }
+  let dia = null;
   for (const entrada of lista) {
-    const donde = entrada.project ? ` ${entrada.project}/${entrada.env}` : '';
-    const clave = entrada.key ? ` ${entrada.key}` : '';
-    caja.append(nodo('div', `${fecha(entrada.at)} · ${entrada.actor} · ${entrada.action}${donde}${clave}`, 'renglon'));
+    const suyo = diaDe(entrada.at);
+    if (suyo !== dia) {
+      dia = suyo;
+      caja.append(nodo('div', etiquetaDeDia(entrada.at), 'dia'));
+    }
+    const { texto, clase } = describir(entrada.action);
+    const renglon = nodo('div', null, 'renglon');
+    renglon.append(nodo('span', horaDe(entrada.at), 'hora'));
+    renglon.append(nodo('span', texto, `accion ${clase}`));
+    renglon.append(nodo('span', entrada.actor, 'actor'));
+    if (entrada.project) {
+      renglon.append(nodo('span', `${entrada.project}/${entrada.env}`, 'donde'));
+    }
+    if (entrada.key) renglon.append(nodo('span', entrada.key, 'objeto'));
+    caja.append(renglon);
   }
 }
 
@@ -487,6 +546,15 @@ $('env').addEventListener('click', () => copiar(comoEnv(estado.secretos)));
 
 $('refrescar').addEventListener('click', () => abrir(estado.project, estado.env));
 
+$('solo-entorno').addEventListener('change', renderAuditoria);
+$('incluir-lecturas').addEventListener('change', renderAuditoria);
+
+$('mostrar-token').addEventListener('click', () => {
+  const formulario = $('token-nuevo');
+  formulario.hidden = !formulario.hidden;
+  if (!formulario.hidden) $('token-nombre').focus();
+});
+
 $('token-nuevo').addEventListener('submit', async (evento) => {
   evento.preventDefault();
   const cuerpo = {
@@ -510,13 +578,13 @@ $('token-nuevo').addEventListener('submit', async (evento) => {
     $('token-nombre').value = '';
     $('token-claves').value = '';
     $('token-ttl').value = '';
+    $('token-nuevo').hidden = true;
     await cargarTokens();
     const caja = nodo('div', null, 'nuevo');
-    caja.append(nodo('div', 'Este token no se vuelve a mostrar:'));
+    caja.append(nodo('div', 'copialo ahora: no se vuelve a mostrar'));
     caja.append(nodo('code', creado.token));
-    caja.append(boton('Copiar', 'fantasma', () => copiar(creado.token)));
+    caja.append(boton('copiar', 'fantasma', () => copiar(creado.token)));
     $('tokens').prepend(caja);
-    aviso('Guardalo ahora, no se vuelve a mostrar.');
   } catch (error) {
     aviso(error.message);
   }
