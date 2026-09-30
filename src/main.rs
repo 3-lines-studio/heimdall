@@ -1,13 +1,6 @@
-mod cli;
-mod crypto;
-mod http;
-mod mail;
-mod server;
-mod store;
-mod web;
-
-use crypto::Key;
-use server::Server;
+use heimdall::crypto::Key;
+use heimdall::server::{self, Server};
+use heimdall::{cli, mail, store};
 use std::sync::{Arc, Mutex};
 
 fn main() {
