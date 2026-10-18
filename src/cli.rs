@@ -89,11 +89,6 @@ fn forward(args: &[String]) -> Result<(), String> {
     Err(format!("no pude correr {program}: {}", child.exec()))
 }
 
-struct Setup {
-    project: String,
-    env: String,
-}
-
 fn setup(args: &[String]) -> Result<(), String> {
     let dir = match flag(args, "--dir") {
         Some(dir) => PathBuf::from(dir),
@@ -152,13 +147,13 @@ fn scope(args: &[String]) -> Result<(String, String), String> {
     let project = pick(
         args,
         &["--project", "-p"],
-        file.as_ref().map(|s| s.project.clone()),
+        file.as_ref().map(|(project, _)| project.clone()),
     )
     .ok_or("falta el proyecto: pasá --project, o corré «heimdall setup»")?;
     let env = pick(
         args,
         &["--config", "-c", "--env"],
-        file.as_ref().map(|s| s.env.clone()),
+        file.as_ref().map(|(_, env)| env.clone()),
     )
     .ok_or("falta el entorno: pasá --config, o corré «heimdall setup»")?;
     Ok((project, env))
@@ -168,8 +163,13 @@ fn pick(args: &[String], names: &[&str], fallback: Option<String>) -> Option<Str
     names.iter().find_map(|name| flag(args, name)).or(fallback)
 }
 
-fn find_setup() -> Option<Setup> {
-    let mut dir = std::env::current_dir().ok()?;
+fn find_setup() -> Option<(String, String)> {
+    setup_at(&std::env::current_dir().ok()?)
+}
+
+/// El `heimdall.yaml` que manda para un directorio, buscando hacia arriba.
+pub fn setup_at(start: &Path) -> Option<(String, String)> {
+    let mut dir = start.to_path_buf();
     loop {
         let file = dir.join(SETUP_FILE);
         if file.is_file() {
@@ -179,12 +179,9 @@ fn find_setup() -> Option<Setup> {
     }
 }
 
-fn read_setup(file: &Path) -> Option<Setup> {
+fn read_setup(file: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(file).ok()?;
-    Some(Setup {
-        project: yaml_value(&text, "project")?,
-        env: yaml_value(&text, "config")?,
-    })
+    Some((yaml_value(&text, "project")?, yaml_value(&text, "config")?))
 }
 
 fn yaml_value(text: &str, key: &str) -> Option<String> {
