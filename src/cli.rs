@@ -36,7 +36,7 @@ heimdall — secretos por proyecto y entorno
   heimdall run [--project X] [--config Y] -- comando
   heimdall login --token T
   heimdall logout
-  heimdall set CLAVE=valor [--project X] [--env Y]
+  heimdall set CLAVE=valor [--project X] [--env Y] [--var]
   heimdall unset CLAVE [--project X] [--env Y]
   heimdall ls [--project X] [--env Y]
   heimdall environments
@@ -202,12 +202,20 @@ fn set(args: &[String]) -> Result<(), String> {
         .filter(|arg| arg.contains('='))
         .ok_or("esperaba CLAVE=valor")?;
     let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+    let secret = !args.iter().any(|arg| arg == "--var");
     call(
         "PUT",
         "/v1/secrets",
-        Some(json!({ "project": project, "env": env, "key": name, "value": value })),
+        Some(
+            json!({ "project": project, "env": env, "key": name, "value": value, "secret": secret }),
+        ),
     )?;
-    println!("{name} guardada en {project}/{env}");
+    let kind = if secret {
+        "guardada"
+    } else {
+        "guardada como variable"
+    };
+    println!("{name} {kind} en {project}/{env}");
     Ok(())
 }
 

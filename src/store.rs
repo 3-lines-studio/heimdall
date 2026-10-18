@@ -1,7 +1,7 @@
 use crate::crypto::{self, Key};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS audit (
     project TEXT NOT NULL,
     env TEXT NOT NULL,
     name TEXT
+);
+CREATE TABLE IF NOT EXISTS plain (
+    project TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (project, env, name)
 );
 CREATE TABLE IF NOT EXISTS environments (
     project TEXT NOT NULL,
@@ -107,6 +113,11 @@ pub struct Store {
     key: Key,
 }
 
+pub struct Resolved {
+    pub values: BTreeMap<String, String>,
+    pub plain: BTreeSet<String>,
+}
+
 impl Store {
     pub fn open(path: PathBuf, key: Key) -> std::result::Result<Store, String> {
         if let Some(parent) = path.parent() {
@@ -160,6 +171,10 @@ impl Store {
             "DELETE FROM secrets WHERE project = ?1 AND env = ?2",
             params![project, env],
         )?;
+        self.db.execute(
+            "DELETE FROM plain WHERE project = ?1 AND env = ?2",
+            params![project, env],
+        )?;
         let declared = self.db.execute(
             "DELETE FROM environments WHERE project = ?1 AND env = ?2",
             params![project, env],
@@ -181,6 +196,8 @@ impl Store {
         let secrets = self
             .db
             .execute("DELETE FROM secrets WHERE project = ?1", params![project])?;
+        self.db
+            .execute("DELETE FROM plain WHERE project = ?1", params![project])?;
         let declared = self.db.execute(
             "DELETE FROM environments WHERE project = ?1",
             params![project],
@@ -234,6 +251,10 @@ impl Store {
             params![project, to],
         )?;
         self.db.execute(
+            "UPDATE plain SET env = ?1 WHERE project = ?2 AND env = ?3",
+            params![to, project, env],
+        )?;
+        self.db.execute(
             "UPDATE environments SET env = ?1 WHERE project = ?2 AND env = ?3",
             params![to, project, env],
         )?;
@@ -283,6 +304,10 @@ impl Store {
         self.db
             .execute("DELETE FROM secrets WHERE project = ?1", params![project])?;
         self.db.execute(
+            "UPDATE plain SET project = ?1 WHERE project = ?2",
+            params![to, project],
+        )?;
+        self.db.execute(
             "UPDATE environments SET project = ?1 WHERE project = ?2",
             params![to, project],
         )?;
@@ -314,12 +339,32 @@ impl Store {
 
     /// Las capas de siempre: lo del vault general y encima lo del proyecto, que
     /// gana cuando la misma clave está en los dos.
-    pub fn resolve(&self, project: &str, env: &str) -> Result<BTreeMap<String, String>> {
-        let mut map = self.secrets(GENERAL, env)?;
+    pub fn resolve(&self, project: &str, env: &str) -> Result<Resolved> {
+        let mut values = self.secrets(GENERAL, env)?;
+        let mut plain = self.plain(GENERAL, env)?;
         if project != GENERAL {
-            map.extend(self.secrets(project, env)?);
+            let over = self.secrets(project, env)?;
+            let over_plain = self.plain(project, env)?;
+            for name in over.keys() {
+                if over_plain.contains(name) {
+                    plain.insert(name.clone());
+                } else {
+                    plain.remove(name);
+                }
+            }
+            values.extend(over);
         }
-        Ok(map)
+        Ok(Resolved { values, plain })
+    }
+
+    /// Las claves que se guardaron como variable y no como secreto: se inyectan
+    /// igual, pero no se redactan.
+    pub fn plain(&self, project: &str, env: &str) -> Result<BTreeSet<String>> {
+        let mut statement = self
+            .db
+            .prepare("SELECT name FROM plain WHERE project = ?1 AND env = ?2")?;
+        let rows = statement.query_map(params![project, env], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<String>>>()?)
     }
 
     pub fn set(
@@ -329,6 +374,29 @@ impl Store {
         name: &str,
         value: &str,
         actor: &str,
+    ) -> Result<()> {
+        self.write(project, env, name, value, actor, true)
+    }
+
+    pub fn set_var(
+        &self,
+        project: &str,
+        env: &str,
+        name: &str,
+        value: &str,
+        actor: &str,
+    ) -> Result<()> {
+        self.write(project, env, name, value, actor, false)
+    }
+
+    fn write(
+        &self,
+        project: &str,
+        env: &str,
+        name: &str,
+        value: &str,
+        actor: &str,
+        secret: bool,
     ) -> Result<()> {
         slug(project)?;
         slug(env)?;
@@ -347,6 +415,17 @@ impl Store {
              ON CONFLICT (project, env, name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![project, env, name, sealed, now()],
         )?;
+        if secret {
+            self.db.execute(
+                "DELETE FROM plain WHERE project = ?1 AND env = ?2 AND name = ?3",
+                params![project, env, name],
+            )?;
+        } else {
+            self.db.execute(
+                "INSERT OR IGNORE INTO plain (project, env, name) VALUES (?1, ?2, ?3)",
+                params![project, env, name],
+            )?;
+        }
         self.audit(actor, "set", project, env, Some(name))?;
         tx.commit()?;
         Ok(())
@@ -356,6 +435,10 @@ impl Store {
         let tx = self.db.unchecked_transaction()?;
         let removed = self.db.execute(
             "DELETE FROM secrets WHERE project = ?1 AND env = ?2 AND name = ?3",
+            params![project, env, name],
+        )?;
+        self.db.execute(
+            "DELETE FROM plain WHERE project = ?1 AND env = ?2 AND name = ?3",
             params![project, env, name],
         )?;
         if removed == 0 {
@@ -750,9 +833,80 @@ mod tests {
         store.set("general", "dev", "B", "1", "berti").unwrap();
         store.set("bifrost", "dev", "B", "2", "berti").unwrap();
         let map = store.resolve("bifrost", "dev").unwrap();
-        assert_eq!(map["A"], "1");
-        assert_eq!(map["B"], "2");
-        assert_eq!(store.resolve("general", "dev").unwrap()["B"], "1");
+        assert_eq!(map.values["A"], "1");
+        assert_eq!(map.values["B"], "2");
+        assert_eq!(store.resolve("general", "dev").unwrap().values["B"], "1");
+    }
+
+    #[test]
+    fn a_variable_is_remembered_as_one() {
+        let store = store();
+        store
+            .set("bifrost", "dev", "TOKEN", "s3cr3t", "berti")
+            .unwrap();
+        store
+            .set_var("bifrost", "dev", "AUTHOR", "Jimmy", "berti")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .plain("bifrost", "dev")
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["AUTHOR".to_string()]
+        );
+
+        store
+            .set("bifrost", "dev", "AUTHOR", "Jimmy", "berti")
+            .unwrap();
+        assert!(store.plain("bifrost", "dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_project_layer_decides_the_kind() {
+        let store = store();
+        store.set("general", "dev", "NAME", "uno", "berti").unwrap();
+        store
+            .set_var("general", "dev", "OTRO", "dos", "berti")
+            .unwrap();
+        store
+            .set_var("bifrost", "dev", "NAME", "tres", "berti")
+            .unwrap();
+
+        let resolved = store.resolve("bifrost", "dev").unwrap();
+
+        assert!(
+            resolved.plain.contains("NAME"),
+            "el proyecto lo hizo variable"
+        );
+        assert!(resolved.plain.contains("OTRO"));
+        assert_eq!(resolved.values["NAME"], "tres");
+    }
+
+    #[test]
+    fn a_renamed_environment_keeps_its_variables() {
+        let store = store();
+        store
+            .set_var("bifrost", "dev", "AUTHOR", "Jimmy", "berti")
+            .unwrap();
+
+        store
+            .rename_environment("bifrost", "dev", "prd", "berti")
+            .unwrap();
+
+        assert!(store.plain("bifrost", "dev").unwrap().is_empty());
+        assert_eq!(
+            store
+                .plain("bifrost", "prd")
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["AUTHOR".to_string()]
+        );
+
+        store.unset("bifrost", "prd", "AUTHOR", "berti").unwrap();
+        assert!(store.plain("bifrost", "prd").unwrap().is_empty());
     }
 
     #[test]
