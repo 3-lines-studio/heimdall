@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_VALUE: usize = 64 * 1024;
 const DB: &str = "heimdall.db";
+const GENERAL: &str = "general";
 const KEY: &str = "master.key";
 
 const SCHEMA: &str = "
@@ -309,6 +310,16 @@ impl Store {
             out.insert(name, text);
         }
         Ok(out)
+    }
+
+    /// Las capas de siempre: lo del vault general y encima lo del proyecto, que
+    /// gana cuando la misma clave está en los dos.
+    pub fn resolve(&self, project: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        let mut map = self.secrets(GENERAL, env)?;
+        if project != GENERAL {
+            map.extend(self.secrets(project, env)?);
+        }
+        Ok(map)
     }
 
     pub fn set(
@@ -730,6 +741,18 @@ mod tests {
             .set("bifrost", "dev", "DB_PASSWORD", "hunter2", "berti")
             .unwrap();
         assert!(!dump(&store).windows(7).any(|w| w == b"hunter2"));
+    }
+
+    #[test]
+    fn the_general_vault_loses_to_the_project() {
+        let store = store();
+        store.set("general", "dev", "A", "1", "berti").unwrap();
+        store.set("general", "dev", "B", "1", "berti").unwrap();
+        store.set("bifrost", "dev", "B", "2", "berti").unwrap();
+        let map = store.resolve("bifrost", "dev").unwrap();
+        assert_eq!(map["A"], "1");
+        assert_eq!(map["B"], "2");
+        assert_eq!(store.resolve("general", "dev").unwrap()["B"], "1");
     }
 
     #[test]
