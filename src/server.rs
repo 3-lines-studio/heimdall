@@ -272,7 +272,16 @@ fn write_secret(store: &Store, actor: &Actor, request: &Request) -> Reply {
     let env = request.field("env").unwrap_or_default();
     let name = request.field("key").unwrap_or_default();
     let value = request.field("value").unwrap_or_default();
-    reply(store.set(&project, &env, &name, &value, actor.label()))?;
+    let secret = request
+        .json()
+        .and_then(|body| body.get("secret").and_then(serde_json::Value::as_bool))
+        .unwrap_or(true);
+    let saved = if secret {
+        store.set(&project, &env, &name, &value, actor.label())
+    } else {
+        store.set_var(&project, &env, &name, &value, actor.label())
+    };
+    reply(saved)?;
     Ok(json!({ "ok": true }))
 }
 

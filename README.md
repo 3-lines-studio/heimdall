@@ -89,6 +89,7 @@ heimdall setup --project bifrost --config dev       # writes ./heimdall.yaml
 
 heimdall run -- npm test
 heimdall set STRIPE_KEY=sk_test_1
+heimdall set GIT_AUTHOR_NAME=Jimmy --var   # a plain variable, not a secret
 heimdall ls
 heimdall environments
 heimdall token create --name agente --keys STRIPE_KEY --ttl 1h
@@ -137,6 +138,12 @@ start:
 The scope does not live in the file alone: what a token reaches is what the
 token says. A token for `bifrost/dev` gets a 403 from `run -c prod`, and the
 repository has no way around it.
+
+Every key is a secret until you say otherwise: `set` seals it and whoever injects
+it keeps it out of logs and transcripts. `--var` says the key is a plain
+variable — stored the same way, injected the same way, but not treated as
+something worth redacting. Only the two values of a secret are treated that way;
+the store does not decide for you.
 
 `run` puts whatever the token sees into the command's environment and takes
 `HEIMDALL_TOKEN` out of it, so the child cannot read the store on its own.

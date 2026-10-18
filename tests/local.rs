@@ -104,6 +104,21 @@ fn another_project_does_not_get_these_secrets() {
 }
 
 #[test]
+fn a_variable_is_stored_as_one() {
+    let root = temp();
+    let vault = root.join("vault");
+    let repo = repo(&root, "bifrost");
+
+    ok(&vault, &["set", "AUTHOR=Jimmy", "--var"], &repo);
+    ok(&vault, &["set", "TOKEN=s3cr3t"], &repo);
+    let store = heimdall::store::Store::open_dir(&vault).unwrap();
+
+    assert!(store.plain("bifrost", "dev").unwrap().contains("AUTHOR"));
+    assert!(!store.plain("bifrost", "dev").unwrap().contains("TOKEN"));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_missing_vault_says_where_it_looked() {
     let root = temp();
     let repo = repo(&root, "bifrost");
