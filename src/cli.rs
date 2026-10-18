@@ -1,3 +1,4 @@
+use crate::{http, server, store};
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -51,8 +52,9 @@ El proyecto y el entorno salen de los flags o, si no los pasás, de un
 heimdall.yaml que se busca en el directorio actual y hacia arriba. Lo escribe
 «heimdall setup». Los flags son los de doppler: -p/--project, -c/--config.
 
-El cliente lee HEIMDALL_URL (por defecto http://127.0.0.1:8080) y HEIMDALL_TOKEN.
-El token también puede estar guardado con «heimdall login»."
+Con HEIMDALL_URL habla con un server y se identifica con HEIMDALL_TOKEN (o el
+que guarda «heimdall login»). Sin HEIMDALL_URL abre el vault del directorio
+HEIMDALL_DIR (por defecto ~/.heimdall) y no necesita token."
     );
 }
 
@@ -73,6 +75,7 @@ fn forward(args: &[String]) -> Result<(), String> {
     let mut child = Command::new(program);
     child.args(rest);
     child.env_remove("HEIMDALL_TOKEN");
+    child.env_remove("HEIMDALL_MASTER_KEY");
     if let Some(map) = secrets.as_object() {
         for (name, value) in map {
             if std::env::var_os(name).is_some() {
@@ -375,7 +378,30 @@ fn audit() -> Result<(), String> {
 }
 
 fn call(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
-    let url = format!("{}{}", base_url(), path);
+    match std::env::var("HEIMDALL_URL") {
+        Ok(url) => remote(&url, method, path, body),
+        Err(_) => local(method, path, body),
+    }
+}
+
+/// Con el vault a mano no hace falta el server: el mismo despacho, sin socket
+/// ni token de por medio.
+fn local(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    let dir = data_dir();
+    let first_write = matches!(method, "PUT" | "POST");
+    if !dir.join("heimdall.db").is_file() && !first_write {
+        return Err(format!(
+            "no hay ningún vault en {}: pasá HEIMDALL_DIR, y escribí el primer secreto para crearlo",
+            dir.display()
+        ));
+    }
+    let store = store::Store::open_dir(&dir)?;
+    let request = http::Request::local(method, path, body.as_ref());
+    server::local(&store, &request).map_err(|(_, message)| message)
+}
+
+fn remote(url: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    let url = format!("{}{}", url.trim_end_matches('/'), path);
     let token = auth_token()?;
     let request = match method {
         "GET" => ureq::get(&url),
@@ -404,8 +430,15 @@ fn call(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> 
     }
 }
 
-fn base_url() -> String {
-    std::env::var("HEIMDALL_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+fn data_dir() -> PathBuf {
+    match std::env::var("HEIMDALL_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => home().join(".heimdall"),
+    }
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
 }
 
 fn auth_token() -> Result<String, String> {
@@ -424,8 +457,7 @@ fn auth_token() -> Result<String, String> {
 }
 
 fn token_file() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".heimdall").join("token")
+    home().join(".heimdall").join("token")
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {

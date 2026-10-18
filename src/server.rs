@@ -15,7 +15,7 @@ const MAX_LIVE: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const AUDIT_LIMIT: usize = 500;
 
-type Reply = Result<Value, (u16, String)>;
+pub type Reply = Result<Value, (u16, String)>;
 
 pub struct Server {
     pub store: Mutex<Store>,
@@ -104,32 +104,45 @@ fn route(server: &Arc<Server>, store: &Store, request: &Request) -> Reply {
         return Ok(json!({ "ok": true }));
     }
     let actor = authenticate(server, store, request)?;
+    dispatch(store, &actor, request)
+}
+
+/// El mismo despacho que atiende la red, con quien tiene la master key en la
+/// mano: si podés abrir el store, ya sos admin.
+pub fn local(store: &Store, request: &Request) -> Reply {
+    if request.path == "/v1/health" {
+        return Ok(json!({ "ok": true }));
+    }
+    dispatch(store, &Actor::Admin("local".to_string()), request)
+}
+
+fn dispatch(store: &Store, actor: &Actor, request: &Request) -> Reply {
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/v1/secrets") => read_secrets(store, &actor, request),
-        ("GET", "/v1/keys") => read_keys(store, &actor, request),
-        ("PUT", "/v1/secrets") => write_secret(store, &actor, request),
-        ("DELETE", "/v1/secrets") => delete_secret(store, &actor, request),
-        ("POST", "/v1/environments") => create_environment(store, &actor, request),
-        ("DELETE", "/v1/environments") => drop_environment(store, &actor, request),
-        ("DELETE", "/v1/projects") => drop_project(store, &actor, request),
-        ("POST", "/v1/rename-environment") => rename_environment(store, &actor, request),
-        ("POST", "/v1/rename-project") => rename_project(store, &actor, request),
+        ("GET", "/v1/secrets") => read_secrets(store, actor, request),
+        ("GET", "/v1/keys") => read_keys(store, actor, request),
+        ("PUT", "/v1/secrets") => write_secret(store, actor, request),
+        ("DELETE", "/v1/secrets") => delete_secret(store, actor, request),
+        ("POST", "/v1/environments") => create_environment(store, actor, request),
+        ("DELETE", "/v1/environments") => drop_environment(store, actor, request),
+        ("DELETE", "/v1/projects") => drop_project(store, actor, request),
+        ("POST", "/v1/rename-environment") => rename_environment(store, actor, request),
+        ("POST", "/v1/rename-project") => rename_project(store, actor, request),
         ("GET", "/v1/environments") => {
-            admin(&actor)?;
+            admin(actor)?;
             let names = reply(store.names())?;
             reply(store.audit(actor.label(), "get-environments", "", "", None))?;
             Ok(json!(names))
         }
         ("GET", "/v1/tokens") => {
-            admin(&actor)?;
+            admin(actor)?;
             let tokens = reply(store.tokens())?;
             reply(store.audit(actor.label(), "get-tokens", "", "", None))?;
             Ok(json!(tokens))
         }
-        ("POST", "/v1/tokens") => create_token(store, &actor, request),
-        ("DELETE", "/v1/tokens") => revoke_token(store, &actor, request),
+        ("POST", "/v1/tokens") => create_token(store, actor, request),
+        ("DELETE", "/v1/tokens") => revoke_token(store, actor, request),
         ("GET", "/v1/audit") => {
-            admin(&actor)?;
+            admin(actor)?;
             let limit = request
                 .param("limit")
                 .and_then(|limit| limit.parse().ok())

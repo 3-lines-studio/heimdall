@@ -68,6 +68,25 @@ impl Request {
             .unwrap_or(false)
     }
 
+    /// La misma petición que armaría el cliente HTTP, para que quien tenga el
+    /// store abierto no tenga que pasar por el socket.
+    pub fn local(method: &str, path: &str, body: Option<&serde_json::Value>) -> Request {
+        let (path, query) = match path.split_once('?') {
+            Some((path, query)) => (path.to_string(), parse_pairs(query)),
+            None => (path.to_string(), HashMap::new()),
+        };
+        Request {
+            method: method.to_string(),
+            path,
+            query,
+            headers: HashMap::new(),
+            body: body
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .unwrap_or_default(),
+            too_large: false,
+        }
+    }
+
     pub fn list(&self, name: &str) -> Option<Vec<String>> {
         let values = self.json()?.get(name)?.as_array()?.clone();
         Some(

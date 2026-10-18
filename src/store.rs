@@ -2,9 +2,12 @@ use crate::crypto::{self, Key};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 const MAX_VALUE: usize = 64 * 1024;
+const DB: &str = "heimdall.db";
+const KEY: &str = "master.key";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS secrets (
@@ -115,6 +118,14 @@ impl Store {
         db.execute_batch(SCHEMA)
             .map_err(|e| format!("no pude armar el esquema: {e}"))?;
         Ok(Store { db, key })
+    }
+
+    /// Abre el vault de un directorio, con la master key del entorno o la del
+    /// propio directorio.
+    pub fn open_dir(dir: &Path) -> std::result::Result<Store, String> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("no pude crear {}: {e}", dir.display()))?;
+        Store::open(dir.join(DB), master_key(dir)?)
     }
 
     /// Lo que se declaró más lo que ya tiene secretos: los entornos que existían
@@ -626,6 +637,39 @@ fn key_name(name: &str) -> Result<()> {
         return bad(format!("«{name}» no es un nombre de variable válido"));
     }
     Ok(())
+}
+
+fn master_key(dir: &Path) -> std::result::Result<Key, String> {
+    let path = dir.join(KEY);
+    let from_env = std::env::var("HEIMDALL_MASTER_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let from_file = std::fs::read_to_string(&path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    let hex = match (from_env, from_file) {
+        (Some(env), Some(file)) if env != file => {
+            return Err(format!(
+                "HEIMDALL_MASTER_KEY no es la de {}: sacá una de las dos",
+                path.display()
+            ))
+        }
+        (Some(env), _) => env,
+        (None, Some(file)) => file,
+        (None, None) => persist_key(&path)?,
+    };
+    Key::from_hex(&hex)
+}
+
+fn persist_key(path: &Path) -> std::result::Result<String, String> {
+    let hex = crypto::random_hex(32)?;
+    std::fs::write(path, format!("{hex}\n"))
+        .map_err(|e| format!("no pude escribir {}: {e}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("no pude proteger {}: {e}", path.display()))?;
+    eprintln!("heimdall: master key nueva en {}", path.display());
+    Ok(hex)
 }
 
 #[cfg(test)]
