@@ -98,6 +98,20 @@ heimdall token revoke --id 3f9c1a
 heimdall audit
 ```
 
+Without `HEIMDALL_URL` the client does not talk to anyone: it opens the vault in
+`HEIMDALL_DIR` (default `~/.heimdall`) itself, with the master key from
+`HEIMDALL_MASTER_KEY` or from the `master.key` next to it. Same commands, same
+`heimdall.yaml`, no server and no token. Whoever can open that directory is
+already the admin, so the token scopes of a server are not enforced there; the
+first secret you write creates the vault.
+
+```
+export HEIMDALL_DIR=/data/heimdall
+
+heimdall set STRIPE_KEY=sk_test_1 --project bifrost --env dev
+heimdall run -- npm test
+```
+
 `setup` writes the project and the environment into `heimdall.yaml`:
 
 ```yaml
